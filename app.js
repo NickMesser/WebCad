@@ -765,44 +765,32 @@ class WebCAD {
         // Start with raw world position
         let snappedPos = { ...this.mouse.world };
         
-        // Apply ortho snapping first if we have a start point and ortho is enabled
-        if (this.orthoEnabled && this.toolState.startPoint) {
-            snappedPos = this.applyOrthoSnap(this.toolState.startPoint, this.mouse.world);
-            this.snapType = 'ortho';
-        }
-        
-        // Then try center/midpoint/endpoint snapping (can override ortho for precise points)
+        // Priority: Snap points > Ortho > Grid
+        // First, check for snap points (endpoints, midpoints, centers, etc.)
+        let foundSnapPoint = false;
         if (this.centerSnapEnabled) {
             const snapResult = this.findSnapPoint(this.mouse.world);
             if (snapResult) {
-                // If ortho is on, only use the snap point if it's close to an ortho angle
-                if (this.orthoEnabled && this.toolState.startPoint) {
-                    const orthoSnapped = this.applyOrthoSnap(this.toolState.startPoint, snapResult);
-                    const distToOrtho = Math.hypot(orthoSnapped.x - snapResult.x, orthoSnapped.y - snapResult.y);
-                    const tolerance = CONFIG.hitTolerance / this.view.scale;
-                    if (distToOrtho < tolerance) {
-                        snappedPos = { x: snapResult.x, y: snapResult.y };
-                        this.activeSnapPoint = snapResult;
-                        this.snapType = snapResult.type;
-                    }
-                } else {
-                    snappedPos = { x: snapResult.x, y: snapResult.y };
-                    this.activeSnapPoint = snapResult;
-                    this.snapType = snapResult.type;
-                }
-            } else if (this.snapEnabled && !this.orthoEnabled) {
-                snappedPos = Geometry.snapToGrid(
-                    this.mouse.world.x, 
-                    this.mouse.world.y, 
-                    CONFIG.snapGridSize
-                );
-                this.snapType = 'grid';
-            } else if (this.snapEnabled && this.orthoEnabled) {
+                snappedPos = { x: snapResult.x, y: snapResult.y };
+                this.activeSnapPoint = snapResult;
+                this.snapType = snapResult.type;
+                foundSnapPoint = true;
+            }
+        }
+        
+        // If no snap point found, try ortho snapping
+        if (!foundSnapPoint && this.orthoEnabled && this.toolState.startPoint) {
+            if (this.snapEnabled) {
                 // Ortho + grid: snap to grid along ortho line
                 snappedPos = this.applyOrthoSnapWithGrid(this.toolState.startPoint, this.mouse.world);
-                this.snapType = 'ortho';
+            } else {
+                snappedPos = this.applyOrthoSnap(this.toolState.startPoint, this.mouse.world);
             }
-        } else if (this.snapEnabled && !this.orthoEnabled) {
+            this.snapType = 'ortho';
+        }
+        
+        // If no snap point and no ortho, try grid snapping
+        if (!foundSnapPoint && !this.orthoEnabled && this.snapEnabled) {
             snappedPos = Geometry.snapToGrid(
                 this.mouse.world.x, 
                 this.mouse.world.y, 
