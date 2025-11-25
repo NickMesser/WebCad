@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebCAD - Professional Drawing Tool</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Top Toolbar -->
+        <header class="toolbar">
+            <div class="toolbar-section brand">
+                <div class="logo">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                        <path d="M2 17l10 5 10-5"/>
+                        <path d="M2 12l10 5 10-5"/>
+                    </svg>
+                </div>
+                <span class="brand-name">WebCAD</span>
+            </div>
+            
+            <div class="toolbar-section tools">
+                <div class="tool-group">
+                    <button class="tool-btn active" data-tool="select" title="Select (V)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>
+                        </svg>
+                        <span>Select</span>
+                    </button>
+                    <button class="tool-btn" data-tool="line" title="Line (L)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="5" y1="19" x2="19" y2="5"/>
+                        </svg>
+                        <span>Line</span>
+                    </button>
+                    <button class="tool-btn" data-tool="rect" title="Rectangle (R)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        </svg>
+                        <span>Rectangle</span>
+                    </button>
+                    <button class="tool-btn" data-tool="circle" title="Circle (C)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="9"/>
+                        </svg>
+                        <span>Circle</span>
+                    </button>
+                    <button class="tool-btn" data-tool="arc" title="Arc (A)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M5 19 A 10 10 0 0 1 19 19"/>
+                            <circle cx="5" cy="19" r="2" fill="currentColor"/>
+                            <circle cx="19" cy="19" r="2" fill="currentColor"/>
+                        </svg>
+                        <span>Arc</span>
+                    </button>
+                    <button class="tool-btn" data-tool="dimension" title="Dimension (D)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="4" y1="12" x2="20" y2="12"/>
+                            <line x1="4" y1="8" x2="4" y2="16"/>
+                            <line x1="20" y1="8" x2="20" y2="16"/>
+                            <path d="M7 12l-3-2m0 4l3-2m10 0l3-2m0 4l-3-2"/>
+                        </svg>
+                        <span>Dimension</span>
+                    </button>
+                </div>
+                
+                <div class="tool-divider"></div>
+                
+                <div class="tool-group">
+                    <button class="tool-btn" data-tool="trim" title="Trim (T)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                            <path d="M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                            <line x1="20" y1="4" x2="8.12" y2="15.88"/>
+                            <line x1="14.47" y1="14.48" x2="20" y2="20"/>
+                            <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+                        </svg>
+                        <span>Trim</span>
+                    </button>
+                    <button class="tool-btn" data-tool="extend" title="Extend (E)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="4" y1="12" x2="14" y2="12"/>
+                            <polyline points="10 8 14 12 10 16"/>
+                            <line x1="20" y1="4" x2="20" y2="20"/>
+                        </svg>
+                        <span>Extend</span>
+                    </button>
+                    <button class="tool-btn" data-tool="offset" title="Offset (F)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="4" y1="6" x2="20" y2="6"/>
+                            <line x1="4" y1="12" x2="20" y2="12" stroke-dasharray="3,2"/>
+                            <line x1="4" y1="18" x2="20" y2="18"/>
+                            <line x1="12" y1="6" x2="12" y2="12" stroke-width="1"/>
+                            <line x1="12" y1="12" x2="12" y2="18" stroke-width="1"/>
+                        </svg>
+                        <span>Offset</span>
+                    </button>
+                    <button class="tool-btn" data-tool="scale" title="Scale (G)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="4" y="4" width="8" height="8"/>
+                            <rect x="8" y="8" width="12" height="12" stroke-dasharray="3,2"/>
+                            <line x1="4" y1="4" x2="8" y2="8"/>
+                        </svg>
+                        <span>Scale</span>
+                    </button>
+                </div>
+                
+                <div class="tool-divider"></div>
+                
+                <div class="tool-group">
+                    <button class="action-btn" id="deleteBtn" title="Delete (Del)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"/>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            
+            <div class="toolbar-section view-controls">
+                <button class="action-btn" id="zoomExtentsBtn" title="Zoom Extents (F)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+                    </svg>
+                </button>
+                <button class="action-btn" id="zoomInBtn" title="Zoom In (+)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        <line x1="11" y1="8" x2="11" y2="14"/>
+                        <line x1="8" y1="11" x2="14" y2="11"/>
+                    </svg>
+                </button>
+                <button class="action-btn" id="zoomOutBtn" title="Zoom Out (-)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        <line x1="8" y1="11" x2="14" y2="11"/>
+                    </svg>
+                </button>
+                
+                <div class="tool-divider"></div>
+                
+                <div class="snap-toggle">
+                    <input type="checkbox" id="snapToggle" checked>
+                    <label for="snapToggle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="7" height="7"/>
+                            <rect x="14" y="3" width="7" height="7"/>
+                            <rect x="14" y="14" width="7" height="7"/>
+                            <rect x="3" y="14" width="7" height="7"/>
+                        </svg>
+                        <span>Grid</span>
+                    </label>
+                </div>
+                
+                <div class="snap-toggle">
+                    <input type="checkbox" id="centerSnapToggle" checked>
+                    <label for="centerSnapToggle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="3"/>
+                            <line x1="12" y1="2" x2="12" y2="6"/>
+                            <line x1="12" y1="18" x2="12" y2="22"/>
+                            <line x1="2" y1="12" x2="6" y2="12"/>
+                            <line x1="18" y1="12" x2="22" y2="12"/>
+                        </svg>
+                        <span>Center</span>
+                    </label>
+                </div>
+                
+                <div class="snap-toggle">
+                    <input type="checkbox" id="orthoToggle">
+                    <label for="orthoToggle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="3" x2="12" y2="21"/>
+                            <line x1="3" y1="12" x2="21" y2="12"/>
+                            <line x1="5" y1="5" x2="19" y2="19" stroke-dasharray="2,2"/>
+                            <line x1="19" y1="5" x2="5" y2="19" stroke-dasharray="2,2"/>
+                        </svg>
+                        <span>Ortho</span>
+                    </label>
+                </div>
+                
+                <div class="ortho-step">
+                    <input type="number" id="orthoStep" value="45" min="1" max="90" step="1" title="Ortho angle step (degrees)">
+                    <span>°</span>
+                </div>
+                
+                <div class="tool-divider"></div>
+                
+                <div class="unit-selector">
+                    <select id="unitSelect">
+                        <option value="mm">mm</option>
+                        <option value="in">inches</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="toolbar-section file-controls">
+                <button class="file-btn" id="newBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="12" y1="18" x2="12" y2="12"/>
+                        <line x1="9" y1="15" x2="15" y2="15"/>
+                    </svg>
+                    <span>New</span>
+                </button>
+                <button class="file-btn" id="loadBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <span>Load</span>
+                </button>
+                <button class="file-btn primary" id="saveBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                        <polyline points="17 21 17 13 7 13 7 21"/>
+                        <polyline points="7 3 7 8 15 8"/>
+                    </svg>
+                    <span>Save DXF</span>
+                </button>
+            </div>
+        </header>
+        
+        <!-- Main Canvas Area -->
+        <main class="canvas-container">
+            <canvas id="cadCanvas"></canvas>
+            
+            <!-- Coordinates Display -->
+            <div class="coords-display">
+                <div class="coord-item">
+                    <span class="coord-label">X:</span>
+                    <span class="coord-value" id="coordX">0.00</span>
+                </div>
+                <div class="coord-item">
+                    <span class="coord-label">Y:</span>
+                    <span class="coord-value" id="coordY">0.00</span>
+                </div>
+                <div class="coord-divider"></div>
+                <div class="coord-item">
+                    <span class="coord-label">Zoom:</span>
+                    <span class="coord-value" id="zoomLevel">100%</span>
+                </div>
+            </div>
+            
+            <!-- Dimension Input Panel -->
+            <div class="dimension-input" id="dimensionInput">
+                <div class="dim-input-header">
+                    <span class="dim-input-title" id="dimInputTitle">Enter Dimensions</span>
+                    <button class="dim-input-close" id="dimInputClose">×</button>
+                </div>
+                <div class="dim-input-fields" id="lineInputFields">
+                    <div class="dim-field">
+                        <label for="inputLength">Length:</label>
+                        <input type="number" id="inputLength" step="any" placeholder="0.00">
+                        <span class="dim-unit" id="lengthUnit">mm</span>
+                    </div>
+                    <div class="dim-field">
+                        <label for="inputAngle">Angle:</label>
+                        <input type="number" id="inputAngle" step="any" placeholder="0" value="0">
+                        <span class="dim-unit">°</span>
+                    </div>
+                </div>
+                <div class="dim-input-fields" id="rectInputFields" style="display: none;">
+                    <div class="dim-field">
+                        <label for="inputWidth">Width:</label>
+                        <input type="number" id="inputWidth" step="any" placeholder="0.00">
+                        <span class="dim-unit" id="widthUnit">mm</span>
+                    </div>
+                    <div class="dim-field">
+                        <label for="inputHeight">Height:</label>
+                        <input type="number" id="inputHeight" step="any" placeholder="0.00">
+                        <span class="dim-unit" id="heightUnit">mm</span>
+                    </div>
+                </div>
+                <div class="dim-input-fields" id="circleInputFields" style="display: none;">
+                    <div class="dim-field">
+                        <label for="inputRadius">Radius:</label>
+                        <input type="number" id="inputRadius" step="any" placeholder="0.00">
+                        <span class="dim-unit" id="radiusUnit">mm</span>
+                    </div>
+                </div>
+                <div class="dim-input-fields" id="offsetInputFields" style="display: none;">
+                    <div class="dim-field">
+                        <label for="inputOffset">Offset:</label>
+                        <input type="number" id="inputOffset" step="any" placeholder="0.00">
+                        <span class="dim-unit" id="offsetUnit">mm</span>
+                    </div>
+                </div>
+                <div class="dim-input-fields" id="scaleInputFields" style="display: none;">
+                    <div class="dim-field">
+                        <label for="inputScale">Scale:</label>
+                        <input type="number" id="inputScale" step="any" placeholder="1.0" value="1">
+                        <span class="dim-unit">×</span>
+                    </div>
+                </div>
+                <div class="dim-input-actions">
+                    <button class="dim-btn" id="dimApplyBtn">Apply (Enter)</button>
+                    <button class="dim-btn secondary" id="dimCancelBtn">Cancel (Esc)</button>
+                </div>
+            </div>
+            
+            <!-- Status Bar -->
+            <div class="status-bar">
+                <span class="status-tool" id="statusTool">Select Tool</span>
+                <span class="status-hint" id="statusHint">Click to select entities</span>
+            </div>
+        </main>
+        
+        <!-- Properties Panel (optional sidebar) -->
+        <aside class="properties-panel" id="propertiesPanel">
+            <div class="panel-header">
+                <h3>Properties</h3>
+                <button class="panel-close" id="closePanelBtn">×</button>
+            </div>
+            <div class="panel-content" id="panelContent">
+                <p class="no-selection">No entity selected</p>
+            </div>
+        </aside>
+    </div>
+    
+    <!-- Hidden file input -->
+    <input type="file" id="fileInput" accept=".dxf,.cad,.json" style="display: none;">
+    
+    <script src="app.js"></script>
+</body>
+</html>
+
