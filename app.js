@@ -569,7 +569,12 @@ class WebCAD {
             arcPoint2: null,
             // Grip editing (endpoint dragging)
             activeGrip: null,  // { entity, gripType, gripIndex }
-            isGripDragging: false
+            isGripDragging: false,
+            // Pattern tools
+            patternEntities: [],
+            patternBasePoint: null,
+            patternType: null,  // 'rect' or 'circ'
+            patternPreview: null
         };
         
         // Dimension input state
@@ -709,6 +714,9 @@ class WebCAD {
             this.hideDimensionInput();
         });
         
+        // Make dimension input panel draggable
+        this.setupDraggablePanel();
+        
         // Handle Enter key in dimension input fields
         const dimInputHandler = (e) => {
             if (e.key === 'Enter') {
@@ -728,6 +736,16 @@ class WebCAD {
         const scaleInput = document.getElementById('inputScale');
         if (offsetInput) offsetInput.addEventListener('keydown', dimInputHandler);
         if (scaleInput) scaleInput.addEventListener('keydown', dimInputHandler);
+        
+        // Pattern input handlers
+        const patternInputs = [
+            'patternCountX', 'patternCountY', 'patternSpacingX', 'patternSpacingY',
+            'patternCount', 'patternRadiusInput', 'patternStartAngle', 'patternSweep'
+        ];
+        patternInputs.forEach(id => {
+            const input = document.getElementById(id);
+            if (input) input.addEventListener('keydown', dimInputHandler);
+        });
     }
     
     // ----------------------------------------
@@ -1083,10 +1101,17 @@ class WebCAD {
             't': 'trim',
             'e': 'extend',
             'f': 'offset',
-            'g': 'scale'
+            'g': 'scale',
+            'p': 'rectPattern'
         };
         
-        if (toolKeys[e.key.toLowerCase()] && !e.ctrlKey && !e.metaKey) {
+        // Shift+P for circular pattern
+        if (e.key.toLowerCase() === 'p' && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            this.setTool('circPattern');
+            return;
+        }
+        
+        if (toolKeys[e.key.toLowerCase()] && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
             this.setTool(toolKeys[e.key.toLowerCase()]);
             return;
         }
@@ -1279,8 +1304,167 @@ class WebCAD {
     hideDimensionInput() {
         const panel = document.getElementById('dimensionInput');
         panel.classList.remove('visible');
+        panel.classList.remove('dragging');
         this.dimInputVisible = false;
+        this.toolState.patternPreview = null;
+        // Reset position to center for next time
+        panel.style.left = '50%';
+        panel.style.top = '50%';
+        panel.style.transform = 'translate(-50%, -50%)';
         this.canvas.focus();
+        this.render();
+    }
+    
+    setupDraggablePanel() {
+        const panel = document.getElementById('dimensionInput');
+        const header = document.querySelector('.dim-input-header');
+        
+        let isDragging = false;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        
+        header.addEventListener('mousedown', (e) => {
+            // Don't drag if clicking on close button
+            if (e.target.classList.contains('dim-input-close')) return;
+            
+            isDragging = true;
+            panel.classList.add('dragging');
+            
+            const rect = panel.getBoundingClientRect();
+            dragOffsetX = e.clientX - rect.left;
+            dragOffsetY = e.clientY - rect.top;
+            
+            // Remove transform so we can use absolute positioning
+            panel.style.transform = 'none';
+            panel.style.left = rect.left + 'px';
+            panel.style.top = rect.top + 'px';
+            
+            e.preventDefault();
+        });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            
+            const container = this.canvas.parentElement;
+            const containerRect = container.getBoundingClientRect();
+            
+            let newX = e.clientX - dragOffsetX - containerRect.left;
+            let newY = e.clientY - dragOffsetY - containerRect.top;
+            
+            // Keep panel within bounds
+            const panelRect = panel.getBoundingClientRect();
+            newX = Math.max(0, Math.min(newX, containerRect.width - panelRect.width));
+            newY = Math.max(0, Math.min(newY, containerRect.height - panelRect.height));
+            
+            panel.style.left = newX + 'px';
+            panel.style.top = newY + 'px';
+        });
+        
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                panel.classList.remove('dragging');
+            }
+        });
+        
+        // Setup live preview for pattern inputs
+        this.setupPatternLivePreview();
+    }
+    
+    setupPatternLivePreview() {
+        const patternInputs = [
+            'patternCountX', 'patternCountY', 'patternSpacingX', 'patternSpacingY',
+            'patternCount', 'patternRadiusInput', 'patternStartAngle', 'patternSweep'
+        ];
+        
+        patternInputs.forEach(id => {
+            const input = document.getElementById(id);
+            if (input) {
+                input.addEventListener('input', () => {
+                    this.updatePatternPreview();
+                });
+            }
+        });
+    }
+    
+    updatePatternPreview() {
+        // Store preview data for rendering
+        if (this.dimInputType === 'rectPattern') {
+            this.toolState.patternPreview = this.calculateRectPatternPreview();
+        } else if (this.dimInputType === 'circPattern') {
+            this.toolState.patternPreview = this.calculateCircPatternPreview();
+        }
+        this.render();
+    }
+    
+    calculateRectPatternPreview() {
+        const countX = parseInt(document.getElementById('patternCountX').value) || 1;
+        const countY = parseInt(document.getElementById('patternCountY').value) || 1;
+        const spacingX = Units.toInternal(parseFloat(document.getElementById('patternSpacingX').value) || 0);
+        const spacingY = Units.toInternal(parseFloat(document.getElementById('patternSpacingY').value) || 0);
+        
+        if (!this.toolState.patternBasePoint || this.toolState.patternEntities.length === 0) {
+            return null;
+        }
+        
+        const previewEntities = [];
+        const sourceEntities = this.toolState.patternEntities;
+        
+        // Create preview copies for each grid position (skip 0,0 as that's the original)
+        for (let ix = 0; ix < countX; ix++) {
+            for (let iy = 0; iy < countY; iy++) {
+                if (ix === 0 && iy === 0) continue;
+                
+                const offsetX = ix * spacingX;
+                const offsetY = iy * spacingY;
+                
+                for (const entity of sourceEntities) {
+                    const copy = this.cloneEntity(entity);
+                    if (copy) {
+                        copy.translate(offsetX, offsetY);
+                        previewEntities.push(copy);
+                    }
+                }
+            }
+        }
+        
+        return { type: 'rect', entities: previewEntities };
+    }
+    
+    calculateCircPatternPreview() {
+        const count = parseInt(document.getElementById('patternCount').value) || 2;
+        const startAngle = (parseFloat(document.getElementById('patternStartAngle').value) || 0) * Math.PI / 180;
+        const sweepAngle = (parseFloat(document.getElementById('patternSweep').value) || 360) * Math.PI / 180;
+        
+        if (!this.toolState.patternBasePoint || this.toolState.patternEntities.length === 0) {
+            return null;
+        }
+        
+        const previewEntities = [];
+        const centerPoint = this.toolState.patternBasePoint;
+        const sourceEntities = this.toolState.patternEntities;
+        
+        // Calculate angle step - for 360° sweep, divide by count (items evenly around circle)
+        // For partial sweep, divide by count-1 (items at start and end of sweep)
+        const isFull360 = Math.abs(sweepAngle - Math.PI * 2) < 0.01;
+        const angleStep = isFull360 ? sweepAngle / count : sweepAngle / Math.max(1, count - 1);
+        
+        // Create preview copies for each angular position
+        for (let i = 0; i < count; i++) {
+            const angle = startAngle + i * angleStep;
+            
+            for (const entity of sourceEntities) {
+                const copy = this.cloneEntity(entity);
+                if (copy) {
+                    if (i > 0 || Math.abs(startAngle) > 0.001) {
+                        this.rotateEntityAroundPoint(copy, centerPoint, angle);
+                    }
+                    previewEntities.push(copy);
+                }
+            }
+        }
+        
+        return { type: 'circ', entities: previewEntities, centerPoint };
     }
     
     applyDimensionInput() {
@@ -1406,6 +1590,12 @@ class WebCAD {
             // Apply scale factor
             this.applyScale(scaleValue);
             return;
+        } else if (this.dimInputType === 'rectPattern') {
+            this.applyRectPattern();
+            return;
+        } else if (this.dimInputType === 'circPattern') {
+            this.applyCircPattern();
+            return;
         }
         
         this.hideDimensionInput();
@@ -1433,6 +1623,10 @@ class WebCAD {
         this.toolState.offsetEntity = null;
         this.toolState.arcPoint1 = null;
         this.toolState.arcPoint2 = null;
+        this.toolState.patternEntities = [];
+        this.toolState.patternBasePoint = null;
+        this.toolState.patternType = null;
+        this.toolState.patternPreview = null;
         this.dimInputType = null;
         
         this.hideDimensionInput();
@@ -1501,7 +1695,9 @@ class WebCAD {
             trim: 'crosshair',
             extend: 'crosshair',
             offset: this.hoveredEntity ? 'pointer' : 'crosshair',
-            scale: 'crosshair'
+            scale: 'crosshair',
+            rectPattern: this.hoveredEntity ? 'pointer' : 'crosshair',
+            circPattern: this.hoveredEntity ? 'pointer' : 'crosshair'
         };
         this.canvas.style.cursor = cursors[this.currentTool] || 'default';
     }
@@ -1520,7 +1716,9 @@ class WebCAD {
             trim: 'Trim Tool',
             extend: 'Extend Tool',
             offset: 'Offset Tool',
-            scale: 'Scale Tool'
+            scale: 'Scale Tool',
+            rectPattern: 'Rectangular Pattern',
+            circPattern: 'Circular Pattern'
         };
         
         let hint = '';
@@ -1571,6 +1769,24 @@ class WebCAD {
                     hint = 'Click second point or type scale factor';
                 }
                 break;
+            case 'rectPattern':
+                if (this.toolState.patternEntities.length === 0) {
+                    hint = 'Select entities to pattern, then click to set base point';
+                } else if (!this.toolState.patternBasePoint) {
+                    hint = 'Click base point for pattern';
+                } else {
+                    hint = 'Enter pattern parameters';
+                }
+                break;
+            case 'circPattern':
+                if (this.toolState.patternEntities.length === 0) {
+                    hint = 'Click to select entity for pattern (or select first, then choose tool)';
+                } else if (!this.toolState.patternBasePoint) {
+                    hint = 'Click to set rotation center point';
+                } else {
+                    hint = 'Adjust pattern settings, then click Apply';
+                }
+                break;
             default:
                 hint = '';
         }
@@ -1614,6 +1830,12 @@ class WebCAD {
                 break;
             case 'scale':
                 this.handleScaleClick(point);
+                break;
+            case 'rectPattern':
+                this.handleRectPatternClick(point);
+                break;
+            case 'circPattern':
+                this.handleCircPatternClick(point);
                 break;
         }
         
@@ -3273,6 +3495,286 @@ class WebCAD {
     }
     
     // ----------------------------------------
+    // RECTANGULAR PATTERN TOOL
+    // ----------------------------------------
+    
+    handleRectPatternClick(point) {
+        if (this.toolState.patternEntities.length === 0) {
+            // Check if there are already selected entities
+            const selected = this.entities.filter(e => e.selected);
+            if (selected.length > 0) {
+                this.toolState.patternEntities = [...selected];
+                this.toolState.patternType = 'rect';
+                this.updateStatus();
+                this.render();
+            } else {
+                // Select entity
+                const hitEntity = this.hitTest(this.mouse.world);
+                if (hitEntity) {
+                    hitEntity.selected = true;
+                    this.toolState.patternEntities = [hitEntity];
+                    this.toolState.patternType = 'rect';
+                    this.updateStatus();
+                    this.render();
+                }
+            }
+        } else if (!this.toolState.patternBasePoint) {
+            // Set base point and show input dialog
+            this.toolState.patternBasePoint = { ...point };
+            this.showPatternInput('rect');
+            this.render();
+        }
+    }
+    
+    // ----------------------------------------
+    // CIRCULAR PATTERN TOOL
+    // ----------------------------------------
+    
+    handleCircPatternClick(point) {
+        if (this.toolState.patternEntities.length === 0) {
+            // Check if there are already selected entities
+            const selected = this.entities.filter(e => e.selected);
+            if (selected.length > 0) {
+                this.toolState.patternEntities = [...selected];
+                this.toolState.patternType = 'circ';
+                this.updateStatus();
+                this.render();
+            } else {
+                // Select entity
+                const hitEntity = this.hitTest(this.mouse.world);
+                if (hitEntity) {
+                    hitEntity.selected = true;
+                    this.toolState.patternEntities = [hitEntity];
+                    this.toolState.patternType = 'circ';
+                    this.updateStatus();
+                    this.render();
+                }
+            }
+        } else if (!this.toolState.patternBasePoint) {
+            // Set center point and show input dialog
+            this.toolState.patternBasePoint = { ...point };
+            this.showPatternInput('circ');
+            this.render();
+        }
+    }
+    
+    showPatternInput(type) {
+        const panel = document.getElementById('dimensionInput');
+        const title = document.getElementById('dimInputTitle');
+        
+        // Hide all input field groups first
+        document.getElementById('lineInputFields').style.display = 'none';
+        document.getElementById('rectInputFields').style.display = 'none';
+        document.getElementById('circleInputFields').style.display = 'none';
+        const offsetFields = document.getElementById('offsetInputFields');
+        const scaleFields = document.getElementById('scaleInputFields');
+        const rectPatternFields = document.getElementById('rectPatternFields');
+        const circPatternFields = document.getElementById('circPatternFields');
+        
+        if (offsetFields) offsetFields.style.display = 'none';
+        if (scaleFields) scaleFields.style.display = 'none';
+        if (rectPatternFields) rectPatternFields.style.display = 'none';
+        if (circPatternFields) circPatternFields.style.display = 'none';
+        
+        if (type === 'rect') {
+            title.textContent = 'Rectangular Pattern';
+            if (rectPatternFields) rectPatternFields.style.display = 'flex';
+            
+            // Update unit labels
+            document.getElementById('spacingXUnit').textContent = CONFIG.units;
+            document.getElementById('spacingYUnit').textContent = CONFIG.units;
+        } else if (type === 'circ') {
+            title.textContent = 'Circular Pattern';
+            if (circPatternFields) circPatternFields.style.display = 'flex';
+            
+            // Update unit labels
+            document.getElementById('patternRadiusUnit').textContent = CONFIG.units;
+            
+            // Calculate default radius based on distance from base point to first entity
+            if (this.toolState.patternEntities.length > 0 && this.toolState.patternBasePoint) {
+                const entity = this.toolState.patternEntities[0];
+                let entityCenter = this.getEntityCenter(entity);
+                const dist = Math.hypot(
+                    entityCenter.x - this.toolState.patternBasePoint.x,
+                    entityCenter.y - this.toolState.patternBasePoint.y
+                );
+                document.getElementById('patternRadiusInput').value = Units.toDisplay(dist).toFixed(2);
+            }
+        }
+        
+        this.dimInputType = type + 'Pattern';
+        panel.classList.add('visible');
+        this.dimInputVisible = true;
+        
+        // Initialize live preview
+        this.updatePatternPreview();
+    }
+    
+    getEntityCenter(entity) {
+        if (entity.type === 'line') {
+            return {
+                x: (entity.x1 + entity.x2) / 2,
+                y: (entity.y1 + entity.y2) / 2
+            };
+        } else if (entity.type === 'circle' || entity.type === 'arc') {
+            return { x: entity.cx, y: entity.cy };
+        } else if (entity.type === 'rect') {
+            return {
+                x: (entity.x1 + entity.x2) / 2,
+                y: (entity.y1 + entity.y2) / 2
+            };
+        }
+        return { x: 0, y: 0 };
+    }
+    
+    applyRectPattern() {
+        const countX = parseInt(document.getElementById('patternCountX').value) || 1;
+        const countY = parseInt(document.getElementById('patternCountY').value) || 1;
+        const spacingX = Units.toInternal(parseFloat(document.getElementById('patternSpacingX').value) || 0);
+        const spacingY = Units.toInternal(parseFloat(document.getElementById('patternSpacingY').value) || 0);
+        
+        if (countX < 1 || countY < 1) return;
+        
+        const basePoint = this.toolState.patternBasePoint;
+        const sourceEntities = this.toolState.patternEntities;
+        
+        // Create copies for each grid position (skip 0,0 as that's the original)
+        for (let ix = 0; ix < countX; ix++) {
+            for (let iy = 0; iy < countY; iy++) {
+                if (ix === 0 && iy === 0) continue; // Skip original position
+                
+                const offsetX = ix * spacingX;
+                const offsetY = iy * spacingY;
+                
+                for (const entity of sourceEntities) {
+                    const copy = this.cloneEntity(entity);
+                    copy.translate(offsetX, offsetY);
+                    copy.selected = false;
+                    this.entities.push(copy);
+                }
+            }
+        }
+        
+        // Deselect original entities
+        sourceEntities.forEach(e => e.selected = false);
+        
+        // Reset pattern tool
+        this.toolState.patternEntities = [];
+        this.toolState.patternBasePoint = null;
+        this.toolState.patternType = null;
+        this.hideDimensionInput();
+        this.render();
+    }
+    
+    applyCircPattern() {
+        const count = parseInt(document.getElementById('patternCount').value) || 2;
+        const startAngle = (parseFloat(document.getElementById('patternStartAngle').value) || 0) * Math.PI / 180;
+        const sweepAngle = (parseFloat(document.getElementById('patternSweep').value) || 360) * Math.PI / 180;
+        
+        if (count < 2) return;
+        if (!this.toolState.patternBasePoint || this.toolState.patternEntities.length === 0) return;
+        
+        const centerPoint = this.toolState.patternBasePoint;
+        const sourceEntities = this.toolState.patternEntities;
+        
+        // Calculate angle between each copy (for count items over sweep angle)
+        // If sweep is 360 and we want items evenly spaced INCLUDING the original,
+        // we need count-1 gaps for count items in a full circle, or count gaps if not full circle
+        const isFull360 = Math.abs(sweepAngle - Math.PI * 2) < 0.01;
+        const angleStep = isFull360 ? sweepAngle / count : sweepAngle / (count - 1);
+        
+        // Create copies for each angular position (skip 0 as that's the original)
+        for (let i = 1; i < count; i++) {
+            const angle = startAngle + i * angleStep;
+            
+            for (const entity of sourceEntities) {
+                const copy = this.cloneEntity(entity);
+                if (!copy) continue;
+                
+                // Rotate copy around center point
+                this.rotateEntityAroundPoint(copy, centerPoint, angle);
+                
+                copy.selected = false;
+                this.entities.push(copy);
+            }
+        }
+        
+        // Rotate original entities if start angle is not 0
+        if (Math.abs(startAngle) > 0.001) {
+            for (const entity of sourceEntities) {
+                this.rotateEntityAroundPoint(entity, centerPoint, startAngle);
+            }
+        }
+        
+        // Deselect original entities
+        sourceEntities.forEach(e => e.selected = false);
+        
+        // Reset pattern tool
+        this.toolState.patternEntities = [];
+        this.toolState.patternBasePoint = null;
+        this.toolState.patternType = null;
+        this.hideDimensionInput();
+        this.render();
+    }
+    
+    cloneEntity(entity) {
+        if (entity.type === 'line') {
+            return new Line(entity.x1, entity.y1, entity.x2, entity.y2);
+        } else if (entity.type === 'circle') {
+            return new Circle(entity.cx, entity.cy, entity.radius);
+        } else if (entity.type === 'arc') {
+            return new Arc(entity.cx, entity.cy, entity.radius, entity.startAngle, entity.endAngle);
+        } else if (entity.type === 'rect') {
+            return new Rectangle(entity.x1, entity.y1, entity.x2, entity.y2);
+        } else if (entity.type === 'dim') {
+            const dim = new Dimension(entity.x1, entity.y1, entity.x2, entity.y2);
+            dim.offset = entity.offset;
+            return dim;
+        }
+        return null;
+    }
+    
+    rotateEntityAroundPoint(entity, center, angle) {
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        
+        const rotatePoint = (x, y) => {
+            const dx = x - center.x;
+            const dy = y - center.y;
+            return {
+                x: center.x + dx * cos - dy * sin,
+                y: center.y + dx * sin + dy * cos
+            };
+        };
+        
+        if (entity.type === 'line' || entity.type === 'dim') {
+            const p1 = rotatePoint(entity.x1, entity.y1);
+            const p2 = rotatePoint(entity.x2, entity.y2);
+            entity.x1 = p1.x;
+            entity.y1 = p1.y;
+            entity.x2 = p2.x;
+            entity.y2 = p2.y;
+        } else if (entity.type === 'circle') {
+            const newCenter = rotatePoint(entity.cx, entity.cy);
+            entity.cx = newCenter.x;
+            entity.cy = newCenter.y;
+        } else if (entity.type === 'arc') {
+            const newCenter = rotatePoint(entity.cx, entity.cy);
+            entity.cx = newCenter.x;
+            entity.cy = newCenter.y;
+            entity.startAngle += angle;
+            entity.endAngle += angle;
+        } else if (entity.type === 'rect') {
+            const p1 = rotatePoint(entity.x1, entity.y1);
+            const p2 = rotatePoint(entity.x2, entity.y2);
+            entity.x1 = p1.x;
+            entity.y1 = p1.y;
+            entity.x2 = p2.x;
+            entity.y2 = p2.y;
+        }
+    }
+    
+    // ----------------------------------------
     // VIEW CONTROLS
     // ----------------------------------------
     
@@ -3379,6 +3881,9 @@ class WebCAD {
         
         // Draw scale preview
         this.drawScalePreview();
+        
+        // Draw pattern preview
+        this.drawPatternPreview();
         
         // Draw grips for selected entities
         this.drawGrips();
@@ -4612,6 +5117,117 @@ class WebCAD {
                 ctx.stroke();
                 ctx.setLineDash([]);
             }
+        }
+    }
+    
+    drawPatternPreview() {
+        if (this.currentTool !== 'rectPattern' && this.currentTool !== 'circPattern') return;
+        
+        const ctx = this.ctx;
+        
+        // Highlight selected entities
+        this.toolState.patternEntities.forEach(entity => {
+            this.drawEntityHighlight(entity, '#58a6ff');
+        });
+        
+        // Draw live preview of pattern
+        if (this.toolState.patternPreview && this.toolState.patternPreview.entities) {
+            ctx.globalAlpha = 0.5;
+            ctx.setLineDash([5, 5]);
+            
+            for (const entity of this.toolState.patternPreview.entities) {
+                this.drawEntityPreview(entity, '#a55eea');
+            }
+            
+            ctx.globalAlpha = 1.0;
+            ctx.setLineDash([]);
+            
+            // For circular pattern, draw the pattern circle
+            if (this.toolState.patternPreview.type === 'circ' && this.toolState.patternBasePoint) {
+                const center = this.toolState.patternBasePoint;
+                // Calculate radius from first entity
+                if (this.toolState.patternEntities.length > 0) {
+                    const entityCenter = this.getEntityCenter(this.toolState.patternEntities[0]);
+                    const radius = Math.hypot(entityCenter.x - center.x, entityCenter.y - center.y);
+                    
+                    const screenCenter = this.view.worldToScreen(center.x, center.y);
+                    const screenRadius = radius * this.view.scale;
+                    
+                    ctx.strokeStyle = 'rgba(165, 94, 234, 0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.arc(screenCenter.x, screenCenter.y, screenRadius, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+        }
+        
+        // Draw base/center point if set
+        if (this.toolState.patternBasePoint) {
+            const base = this.view.worldToScreen(this.toolState.patternBasePoint.x, this.toolState.patternBasePoint.y);
+            
+            ctx.strokeStyle = '#a55eea';
+            ctx.fillStyle = '#a55eea';
+            ctx.lineWidth = 2;
+            
+            if (this.currentTool === 'circPattern') {
+                // Circle for center point
+                ctx.beginPath();
+                ctx.arc(base.x, base.y, 8, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(base.x, base.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            } else {
+                // Crosshair for base point
+                const s = 10;
+                ctx.beginPath();
+                ctx.moveTo(base.x - s, base.y);
+                ctx.lineTo(base.x + s, base.y);
+                ctx.moveTo(base.x, base.y - s);
+                ctx.lineTo(base.x, base.y + s);
+                ctx.stroke();
+                ctx.fillRect(base.x - 3, base.y - 3, 6, 6);
+            }
+        }
+    }
+    
+    drawEntityPreview(entity, color) {
+        const ctx = this.ctx;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        
+        if (entity.type === 'line') {
+            const p1 = this.view.worldToScreen(entity.x1, entity.y1);
+            const p2 = this.view.worldToScreen(entity.x2, entity.y2);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.stroke();
+        } else if (entity.type === 'circle') {
+            const center = this.view.worldToScreen(entity.cx, entity.cy);
+            const radius = entity.radius * this.view.scale;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+        } else if (entity.type === 'arc') {
+            const center = this.view.worldToScreen(entity.cx, entity.cy);
+            const radius = entity.radius * this.view.scale;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, -entity.startAngle, -entity.endAngle, true);
+            ctx.stroke();
+        } else if (entity.type === 'rect') {
+            const p1 = this.view.worldToScreen(entity.x1, entity.y1);
+            const p2 = this.view.worldToScreen(entity.x2, entity.y2);
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.lineTo(p1.x, p2.y);
+            ctx.closePath();
+            ctx.stroke();
         }
     }
     

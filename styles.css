@@ -467,6 +467,11 @@ body {
     display: block;
 }
 
+.dimension-input.dragging {
+    animation: none;
+    user-select: none;
+}
+
 @keyframes slideIn {
     from {
         opacity: 0;
@@ -486,6 +491,11 @@ body {
     border-bottom: 1px solid var(--border-primary);
     background: var(--bg-tertiary);
     border-radius: 12px 12px 0 0;
+    cursor: move;
+}
+
+.dim-input-header:active {
+    cursor: grabbing;
 }
 
 .dim-input-title {
