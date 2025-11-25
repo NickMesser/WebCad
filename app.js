@@ -566,7 +566,10 @@ class WebCAD {
             offsetDistance: 10,
             // Arc tool (3-point arc)
             arcPoint1: null,
-            arcPoint2: null
+            arcPoint2: null,
+            // Grip editing (endpoint dragging)
+            activeGrip: null,  // { entity, gripType, gripIndex }
+            isGripDragging: false
         };
         
         // Dimension input state
@@ -991,6 +994,13 @@ class WebCAD {
             this.toolState.selectionBoxEnd = null;
             this.toolState.isSelectionBox = false;
             this.render();
+        }
+        
+        // Handle grip drag end
+        if (this.toolState.isGripDragging) {
+            this.toolState.isGripDragging = false;
+            this.toolState.activeGrip = null;
+            this.toolState.dragStart = null;
         }
         
         // Handle drag end
@@ -1472,6 +1482,15 @@ class WebCAD {
     }
     
     updateCursor() {
+        // Check for grip hover in select mode
+        if (this.currentTool === 'select' && this.toolState.selectedEntities.length > 0) {
+            const gripHit = this.hitTestGrip(this.mouse.world);
+            if (gripHit) {
+                this.canvas.style.cursor = 'move';
+                return;
+            }
+        }
+        
         const cursors = {
             select: this.hoveredEntity ? 'pointer' : 'default',
             line: 'crosshair',
@@ -1606,8 +1625,17 @@ class WebCAD {
             this.toolState.previewPoint = { ...this.mouse.snapped };
         }
         
-        // Handle dragging selected entities
-        if (this.currentTool === 'select' && this.toolState.isDragging && this.toolState.dragStart) {
+        // Handle grip dragging (endpoint editing)
+        if (this.currentTool === 'select' && this.toolState.isGripDragging && this.toolState.activeGrip) {
+            const grip = this.toolState.activeGrip;
+            const entity = grip.entity;
+            const newPos = this.mouse.snapped;
+            
+            this.moveEntityGrip(entity, grip.gripType, grip.gripIndex, newPos);
+            this.toolState.dragStart = { ...newPos };
+        }
+        // Handle dragging selected entities (move entire entity)
+        else if (this.currentTool === 'select' && this.toolState.isDragging && this.toolState.dragStart) {
             const dx = this.mouse.snapped.x - this.toolState.dragStart.x;
             const dy = this.mouse.snapped.y - this.toolState.dragStart.y;
             
@@ -1643,6 +1671,15 @@ class WebCAD {
     // ----------------------------------------
     
     handleSelectClick(point) {
+        // First check if clicking on a grip of a selected entity
+        const gripHit = this.hitTestGrip(this.mouse.world);
+        if (gripHit) {
+            this.toolState.activeGrip = gripHit;
+            this.toolState.isGripDragging = true;
+            this.toolState.dragStart = { ...point };
+            return;
+        }
+        
         const hitEntity = this.hitTest(this.mouse.world);
         
         if (hitEntity) {
@@ -1661,6 +1698,147 @@ class WebCAD {
             }
         } else {
             this.clearSelection();
+        }
+    }
+    
+    // Hit test for grips (endpoints) of selected entities
+    hitTestGrip(worldPoint) {
+        const tolerance = CONFIG.hitTolerance / this.view.scale;
+        
+        for (const entity of this.toolState.selectedEntities) {
+            const grips = this.getEntityGrips(entity);
+            
+            for (let i = 0; i < grips.length; i++) {
+                const grip = grips[i];
+                const dist = Math.hypot(worldPoint.x - grip.x, worldPoint.y - grip.y);
+                if (dist <= tolerance) {
+                    return {
+                        entity: entity,
+                        gripType: grip.type,
+                        gripIndex: i,
+                        x: grip.x,
+                        y: grip.y
+                    };
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    // Get grip points for an entity
+    getEntityGrips(entity) {
+        const grips = [];
+        
+        if (entity.type === 'line') {
+            grips.push({ x: entity.x1, y: entity.y1, type: 'start' });
+            grips.push({ x: entity.x2, y: entity.y2, type: 'end' });
+            // Midpoint grip
+            grips.push({ 
+                x: (entity.x1 + entity.x2) / 2, 
+                y: (entity.y1 + entity.y2) / 2, 
+                type: 'mid' 
+            });
+        } else if (entity.type === 'circle') {
+            // Center and quadrant grips
+            grips.push({ x: entity.cx, y: entity.cy, type: 'center' });
+            grips.push({ x: entity.cx + entity.radius, y: entity.cy, type: 'quadrant', angle: 0 });
+            grips.push({ x: entity.cx, y: entity.cy + entity.radius, type: 'quadrant', angle: 90 });
+            grips.push({ x: entity.cx - entity.radius, y: entity.cy, type: 'quadrant', angle: 180 });
+            grips.push({ x: entity.cx, y: entity.cy - entity.radius, type: 'quadrant', angle: 270 });
+        } else if (entity.type === 'arc') {
+            // Center, start, end, and mid grips
+            grips.push({ x: entity.cx, y: entity.cy, type: 'center' });
+            const startPt = entity.getStartPoint();
+            const endPt = entity.getEndPoint();
+            grips.push({ x: startPt.x, y: startPt.y, type: 'start' });
+            grips.push({ x: endPt.x, y: endPt.y, type: 'end' });
+            // Midpoint of arc
+            const midAngle = entity.startAngle + entity.getSweepAngle() / 2;
+            grips.push({ 
+                x: entity.cx + entity.radius * Math.cos(midAngle),
+                y: entity.cy + entity.radius * Math.sin(midAngle),
+                type: 'mid'
+            });
+        } else if (entity.type === 'rect') {
+            grips.push({ x: entity.x1, y: entity.y1, type: 'corner', index: 0 });
+            grips.push({ x: entity.x2, y: entity.y1, type: 'corner', index: 1 });
+            grips.push({ x: entity.x2, y: entity.y2, type: 'corner', index: 2 });
+            grips.push({ x: entity.x1, y: entity.y2, type: 'corner', index: 3 });
+        } else if (entity.type === 'dim') {
+            grips.push({ x: entity.x1, y: entity.y1, type: 'start' });
+            grips.push({ x: entity.x2, y: entity.y2, type: 'end' });
+        }
+        
+        return grips;
+    }
+    
+    // Move a grip point on an entity
+    moveEntityGrip(entity, gripType, gripIndex, newPos) {
+        if (entity.type === 'line') {
+            if (gripType === 'start') {
+                entity.x1 = newPos.x;
+                entity.y1 = newPos.y;
+            } else if (gripType === 'end') {
+                entity.x2 = newPos.x;
+                entity.y2 = newPos.y;
+            } else if (gripType === 'mid') {
+                // Move entire line
+                const dx = newPos.x - (entity.x1 + entity.x2) / 2;
+                const dy = newPos.y - (entity.y1 + entity.y2) / 2;
+                entity.translate(dx, dy);
+            }
+        } else if (entity.type === 'circle') {
+            if (gripType === 'center') {
+                entity.cx = newPos.x;
+                entity.cy = newPos.y;
+            } else if (gripType === 'quadrant') {
+                // Change radius based on distance from center
+                entity.radius = Math.hypot(newPos.x - entity.cx, newPos.y - entity.cy);
+            }
+        } else if (entity.type === 'arc') {
+            if (gripType === 'center') {
+                entity.cx = newPos.x;
+                entity.cy = newPos.y;
+            } else if (gripType === 'start') {
+                // Move start point - recalculate start angle
+                entity.startAngle = Math.atan2(newPos.y - entity.cy, newPos.x - entity.cx);
+                // Optionally adjust radius to match new position
+                entity.radius = Math.hypot(newPos.x - entity.cx, newPos.y - entity.cy);
+            } else if (gripType === 'end') {
+                // Move end point - recalculate end angle
+                entity.endAngle = Math.atan2(newPos.y - entity.cy, newPos.x - entity.cx);
+                // Optionally adjust radius to match new position
+                entity.radius = Math.hypot(newPos.x - entity.cx, newPos.y - entity.cy);
+            } else if (gripType === 'mid') {
+                // Change radius based on midpoint position
+                entity.radius = Math.hypot(newPos.x - entity.cx, newPos.y - entity.cy);
+            }
+        } else if (entity.type === 'rect') {
+            // Rectangle corner editing
+            if (gripType === 'corner') {
+                if (gripIndex === 0) {
+                    entity.x1 = newPos.x;
+                    entity.y1 = newPos.y;
+                } else if (gripIndex === 1) {
+                    entity.x2 = newPos.x;
+                    entity.y1 = newPos.y;
+                } else if (gripIndex === 2) {
+                    entity.x2 = newPos.x;
+                    entity.y2 = newPos.y;
+                } else if (gripIndex === 3) {
+                    entity.x1 = newPos.x;
+                    entity.y2 = newPos.y;
+                }
+            }
+        } else if (entity.type === 'dim') {
+            if (gripType === 'start') {
+                entity.x1 = newPos.x;
+                entity.y1 = newPos.y;
+            } else if (gripType === 'end') {
+                entity.x2 = newPos.x;
+                entity.y2 = newPos.y;
+            }
         }
     }
     
@@ -3202,6 +3380,9 @@ class WebCAD {
         // Draw scale preview
         this.drawScalePreview();
         
+        // Draw grips for selected entities
+        this.drawGrips();
+        
         // Draw crosshair at cursor
         this.drawCrosshair();
     }
@@ -3848,6 +4029,59 @@ class WebCAD {
         // Text
         ctx.fillStyle = CONFIG.colors.crosshair;
         ctx.fillText(text, centerX, centerY);
+    }
+    
+    drawGrips() {
+        if (this.currentTool !== 'select') return;
+        if (this.toolState.selectedEntities.length === 0) return;
+        
+        const ctx = this.ctx;
+        const gripSize = 6;
+        
+        for (const entity of this.toolState.selectedEntities) {
+            const grips = this.getEntityGrips(entity);
+            
+            for (const grip of grips) {
+                const screenPos = this.view.worldToScreen(grip.x, grip.y);
+                
+                // Determine grip color based on type
+                let fillColor = '#58a6ff';  // Default blue
+                let strokeColor = '#ffffff';
+                
+                if (grip.type === 'center') {
+                    fillColor = '#ff6b6b';  // Red for center
+                } else if (grip.type === 'mid') {
+                    fillColor = '#ffd93d';  // Yellow for midpoint
+                } else if (grip.type === 'quadrant') {
+                    fillColor = '#a55eea';  // Purple for quadrant
+                }
+                
+                // Check if this grip is being hovered
+                const mouseScreen = this.view.worldToScreen(this.mouse.world.x, this.mouse.world.y);
+                const distToMouse = Math.hypot(screenPos.x - mouseScreen.x, screenPos.y - mouseScreen.y);
+                const isHovered = distToMouse < gripSize + 4;
+                
+                // Draw grip square
+                ctx.fillStyle = fillColor;
+                ctx.strokeStyle = strokeColor;
+                ctx.lineWidth = 1;
+                
+                const size = isHovered ? gripSize + 2 : gripSize;
+                ctx.fillRect(screenPos.x - size/2, screenPos.y - size/2, size, size);
+                ctx.strokeRect(screenPos.x - size/2, screenPos.y - size/2, size, size);
+                
+                // Draw crosshair inside center grip
+                if (grip.type === 'center') {
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.beginPath();
+                    ctx.moveTo(screenPos.x - size/2 + 1, screenPos.y);
+                    ctx.lineTo(screenPos.x + size/2 - 1, screenPos.y);
+                    ctx.moveTo(screenPos.x, screenPos.y - size/2 + 1);
+                    ctx.lineTo(screenPos.x, screenPos.y + size/2 - 1);
+                    ctx.stroke();
+                }
+            }
+        }
     }
     
     drawCrosshair() {
