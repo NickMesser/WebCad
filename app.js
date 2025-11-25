@@ -644,6 +644,12 @@ class WebCAD {
         this.snapPointsCache = null;
         this.snapPointsCacheValid = false;
         
+        // History/Undo system
+        this.history = [];
+        this.historyIndex = -1;
+        this.maxHistory = 50;
+        this.isUndoRedo = false;  // Flag to prevent saving during undo/redo
+        
         // Dimension input state
         this.dimInputVisible = false;
         
@@ -669,6 +675,9 @@ class WebCAD {
         this.setTool('select');
         this.centerView();
         this.render();
+        
+        // Initialize history with empty state
+        this.saveToHistory();
     }
     
     setupCanvas() {
@@ -1427,6 +1436,7 @@ class WebCAD {
             this.toolState.activeGrip = null;
             this.toolState.dragStart = null;
             this.invalidateSnapCache();
+            this.saveToHistory();
         }
         
         // Handle drag end
@@ -1434,6 +1444,7 @@ class WebCAD {
             this.toolState.isDragging = false;
             this.toolState.dragStart = null;
             this.invalidateSnapCache();
+            this.saveToHistory();
         }
     }
     
@@ -1535,6 +1546,23 @@ class WebCAD {
         
         if (toolKeys[e.key.toLowerCase()] && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
             this.setTool(toolKeys[e.key.toLowerCase()]);
+            return;
+        }
+        
+        // Undo/Redo shortcuts
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) {
+                this.redo();
+            } else {
+                this.undo();
+            }
+            return;
+        }
+        
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+            e.preventDefault();
+            this.redo();
             return;
         }
         
@@ -1937,6 +1965,7 @@ class WebCAD {
                 );
                 this.entities.push(line);
                 this.invalidateSnapCache();
+                this.saveToHistory();
                 
                 // Continue from end point (continuous mode)
                 this.toolState.startPoint = { x: endX, y: endY };
@@ -1977,6 +2006,7 @@ class WebCAD {
                 this.entities.push(new Line(x1, y2, x1, y1)); // Left
                 
                 this.invalidateSnapCache();
+                this.saveToHistory();
                 this.toolState.startPoint = null;
                 this.toolState.previewPoint = null;
             }
@@ -2001,6 +2031,7 @@ class WebCAD {
                 );
                 this.entities.push(circle);
                 this.invalidateSnapCache();
+                this.saveToHistory();
                 this.toolState.startPoint = null;
                 this.toolState.previewPoint = null;
             }
@@ -2793,11 +2824,14 @@ class WebCAD {
     }
     
     deleteSelected() {
-        this.entities = this.entities.filter(e => !e.selected);
-        this.toolState.selectedEntities = [];
-        this.invalidateSnapCache();
-        document.getElementById('propertiesPanel').classList.remove('open');
-        this.render();
+        if (this.entities.some(e => e.selected)) {
+            this.entities = this.entities.filter(e => !e.selected);
+            this.toolState.selectedEntities = [];
+            this.invalidateSnapCache();
+            this.saveToHistory();
+            document.getElementById('propertiesPanel').classList.remove('open');
+            this.render();
+        }
     }
     
     // ----------------------------------------
@@ -2820,6 +2854,7 @@ class WebCAD {
             );
             this.entities.push(line);
             this.invalidateSnapCache();
+            this.saveToHistory();
             
             // Continuous mode: end point becomes new start point
             // User presses Escape to exit
@@ -2856,6 +2891,7 @@ class WebCAD {
             this.entities.push(new Line(x1, y2, x1, y1));
             
             this.invalidateSnapCache();
+            this.saveToHistory();
             this.toolState.startPoint = null;
             this.toolState.previewPoint = null;
         }
@@ -2886,6 +2922,7 @@ class WebCAD {
                 );
                 this.entities.push(circle);
                 this.invalidateSnapCache();
+                this.saveToHistory();
             }
             
             this.toolState.startPoint = null;
@@ -2917,6 +2954,7 @@ class WebCAD {
             if (arc) {
                 this.entities.push(arc);
                 this.invalidateSnapCache();
+                this.saveToHistory();
             }
             
             // Reset for next arc
@@ -3009,6 +3047,7 @@ class WebCAD {
             );
             this.entities.push(dim);
             this.invalidateSnapCache();
+            this.saveToHistory();
             this.toolState.startPoint = null;
             this.toolState.previewPoint = null;
         }
@@ -3075,6 +3114,7 @@ class WebCAD {
         
         this.entities.push(text);
         this.invalidateSnapCache();
+        this.saveToHistory();
         this.toolState.textInsertPoint = null;
         this.hideDimensionInput();
         this.render();
@@ -3149,6 +3189,7 @@ class WebCAD {
             }
             
             this.invalidateSnapCache();
+            this.saveToHistory();
             this.toolState.trimPreview = null;
             this.render();
         }
@@ -4038,6 +4079,7 @@ class WebCAD {
         }
         
         this.invalidateSnapCache();
+        this.saveToHistory();
         
         // Keep the entity selected for multiple offsets
         this.toolState.offsetEntity = entity;
@@ -4127,6 +4169,9 @@ class WebCAD {
             entity.selected = false;
         });
         
+        this.invalidateSnapCache();
+        this.saveToHistory();
+        
         // Reset scale tool
         this.toolState.scaleEntities = [];
         this.toolState.scaleBasePoint = null;
@@ -4198,6 +4243,7 @@ class WebCAD {
         });
         
         this.invalidateSnapCache();
+        this.saveToHistory();
         
         // Reset rotate tool
         this.toolState.rotateEntities = [];
@@ -4372,6 +4418,7 @@ class WebCAD {
         sourceEntities.forEach(e => e.selected = false);
         
         this.invalidateSnapCache();
+        this.saveToHistory();
         
         // Reset pattern tool
         this.toolState.patternEntities = [];
@@ -4425,6 +4472,7 @@ class WebCAD {
         sourceEntities.forEach(e => e.selected = false);
         
         this.invalidateSnapCache();
+        this.saveToHistory();
         
         // Reset pattern tool
         this.toolState.patternEntities = [];
@@ -4649,6 +4697,279 @@ class WebCAD {
         this.invalidateSnapCache();
     }
     
+    // ----------------------------------------
+    // HISTORY / UNDO-REDO SYSTEM
+    // ----------------------------------------
+    
+    // Save current state to history
+    saveToHistory() {
+        if (this.isUndoRedo) return;
+        
+        // If we're not at the end of history, remove future states
+        if (this.historyIndex < this.history.length - 1) {
+            this.history = this.history.slice(0, this.historyIndex + 1);
+        }
+        
+        // Serialize current entities
+        const snapshot = this.serializeEntities();
+        
+        // Add to history
+        this.history.push({
+            entities: snapshot,
+            timestamp: Date.now()
+        });
+        
+        // Limit history size
+        if (this.history.length > this.maxHistory) {
+            this.history.shift();
+        } else {
+            this.historyIndex++;
+        }
+        
+        // Update history bar
+        this.updateHistoryBar();
+    }
+    
+    // Serialize all entities to a JSON-safe format
+    serializeEntities() {
+        return this.entities.map(e => {
+            const obj = { type: e.type, selected: e.selected };
+            if (e.type === 'line') {
+                obj.x1 = e.x1; obj.y1 = e.y1;
+                obj.x2 = e.x2; obj.y2 = e.y2;
+            } else if (e.type === 'rect') {
+                obj.x1 = e.x1; obj.y1 = e.y1;
+                obj.x2 = e.x2; obj.y2 = e.y2;
+            } else if (e.type === 'circle') {
+                obj.cx = e.cx; obj.cy = e.cy;
+                obj.radius = e.radius;
+            } else if (e.type === 'arc') {
+                obj.cx = e.cx; obj.cy = e.cy;
+                obj.radius = e.radius;
+                obj.startAngle = e.startAngle;
+                obj.endAngle = e.endAngle;
+            } else if (e.type === 'dim') {
+                obj.x1 = e.x1; obj.y1 = e.y1;
+                obj.x2 = e.x2; obj.y2 = e.y2;
+                obj.offset = e.offset;
+            } else if (e.type === 'text') {
+                obj.x = e.x; obj.y = e.y;
+                obj.text = e.text;
+                obj.height = e.height;
+                obj.rotation = e.rotation;
+            }
+            return obj;
+        });
+    }
+    
+    // Deserialize entities from snapshot
+    deserializeEntities(snapshot) {
+        return snapshot.map(item => {
+            let entity;
+            switch (item.type) {
+                case 'line':
+                    entity = new Line(item.x1, item.y1, item.x2, item.y2);
+                    break;
+                case 'rect':
+                    entity = new Rectangle(item.x1, item.y1, item.x2, item.y2);
+                    break;
+                case 'circle':
+                    entity = new Circle(item.cx, item.cy, item.radius);
+                    break;
+                case 'arc':
+                    entity = new Arc(item.cx, item.cy, item.radius, item.startAngle, item.endAngle);
+                    break;
+                case 'dim':
+                    entity = new Dimension(item.x1, item.y1, item.x2, item.y2);
+                    if (item.offset) entity.offset = item.offset;
+                    break;
+                case 'text':
+                    entity = new Text(item.x, item.y, item.text, item.height, item.rotation);
+                    break;
+            }
+            if (entity && item.selected) entity.selected = true;
+            return entity;
+        }).filter(e => e !== undefined);
+    }
+    
+    // Undo last action
+    undo() {
+        if (this.historyIndex <= 0) return;
+        
+        this.isUndoRedo = true;
+        this.historyIndex--;
+        
+        const snapshot = this.history[this.historyIndex];
+        this.entities = this.deserializeEntities(snapshot.entities);
+        
+        this.invalidateSnapCache();
+        this.clearSelection();
+        this.updateHistoryBar();
+        this.render();
+        this.isUndoRedo = false;
+    }
+    
+    // Redo undone action
+    redo() {
+        if (this.historyIndex >= this.history.length - 1) return;
+        
+        this.isUndoRedo = true;
+        this.historyIndex++;
+        
+        const snapshot = this.history[this.historyIndex];
+        this.entities = this.deserializeEntities(snapshot.entities);
+        
+        this.invalidateSnapCache();
+        this.clearSelection();
+        this.updateHistoryBar();
+        this.render();
+        this.isUndoRedo = false;
+    }
+    
+    // Jump to specific history state
+    jumpToHistory(index) {
+        if (index < 0 || index >= this.history.length || index === this.historyIndex) return;
+        
+        this.isUndoRedo = true;
+        this.historyIndex = index;
+        
+        const snapshot = this.history[this.historyIndex];
+        this.entities = this.deserializeEntities(snapshot.entities);
+        
+        this.invalidateSnapCache();
+        this.clearSelection();
+        this.updateHistoryBar();
+        this.render();
+        this.isUndoRedo = false;
+    }
+    
+    // Update the visual history bar
+    updateHistoryBar() {
+        const container = document.getElementById('historyBar');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        this.history.forEach((snapshot, index) => {
+            const item = document.createElement('div');
+            item.className = 'history-item' + (index === this.historyIndex ? ' active' : '');
+            if (index > this.historyIndex) item.classList.add('future');
+            
+            // Create mini preview
+            const canvas = document.createElement('canvas');
+            canvas.width = 40;
+            canvas.height = 30;
+            this.drawHistoryThumbnail(canvas, snapshot.entities);
+            
+            item.appendChild(canvas);
+            
+            // Add step number
+            const label = document.createElement('span');
+            label.className = 'history-label';
+            label.textContent = index + 1;
+            item.appendChild(label);
+            
+            item.addEventListener('click', () => this.jumpToHistory(index));
+            item.title = `Step ${index + 1} - Click to restore`;
+            
+            container.appendChild(item);
+        });
+        
+        // Scroll to active item
+        const activeItem = container.querySelector('.history-item.active');
+        if (activeItem) {
+            activeItem.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+        }
+    }
+    
+    // Draw a mini thumbnail for history
+    drawHistoryThumbnail(canvas, entities) {
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+        
+        // Dark background
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, width, height);
+        
+        if (entities.length === 0) {
+            ctx.fillStyle = '#333';
+            ctx.fillRect(width/2 - 5, height/2 - 5, 10, 10);
+            return;
+        }
+        
+        // Calculate bounds
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        
+        for (const e of entities) {
+            if (e.type === 'line' || e.type === 'rect' || e.type === 'dim') {
+                minX = Math.min(minX, e.x1, e.x2);
+                maxX = Math.max(maxX, e.x1, e.x2);
+                minY = Math.min(minY, e.y1, e.y2);
+                maxY = Math.max(maxY, e.y1, e.y2);
+            } else if (e.type === 'circle' || e.type === 'arc') {
+                minX = Math.min(minX, e.cx - e.radius);
+                maxX = Math.max(maxX, e.cx + e.radius);
+                minY = Math.min(minY, e.cy - e.radius);
+                maxY = Math.max(maxY, e.cy + e.radius);
+            } else if (e.type === 'text') {
+                minX = Math.min(minX, e.x);
+                maxX = Math.max(maxX, e.x + e.height * 3);
+                minY = Math.min(minY, e.y);
+                maxY = Math.max(maxY, e.y + e.height);
+            }
+        }
+        
+        // Add padding
+        const padding = 4;
+        const rangeX = maxX - minX || 1;
+        const rangeY = maxY - minY || 1;
+        const scaleX = (width - padding * 2) / rangeX;
+        const scaleY = (height - padding * 2) / rangeY;
+        const scale = Math.min(scaleX, scaleY);
+        
+        const offsetX = padding + (width - padding * 2 - rangeX * scale) / 2;
+        const offsetY = padding + (height - padding * 2 - rangeY * scale) / 2;
+        
+        const toScreen = (x, y) => ({
+            x: offsetX + (x - minX) * scale,
+            y: height - (offsetY + (y - minY) * scale)
+        });
+        
+        // Draw entities
+        ctx.strokeStyle = '#00d4ff';
+        ctx.lineWidth = 1;
+        
+        for (const e of entities) {
+            ctx.beginPath();
+            if (e.type === 'line') {
+                const p1 = toScreen(e.x1, e.y1);
+                const p2 = toScreen(e.x2, e.y2);
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+            } else if (e.type === 'rect') {
+                const p1 = toScreen(e.x1, e.y1);
+                const p2 = toScreen(e.x2, e.y2);
+                ctx.rect(Math.min(p1.x, p2.x), Math.min(p1.y, p2.y), 
+                         Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y));
+            } else if (e.type === 'circle') {
+                const center = toScreen(e.cx, e.cy);
+                const radius = e.radius * scale;
+                ctx.arc(center.x, center.y, Math.max(1, radius), 0, Math.PI * 2);
+            } else if (e.type === 'arc') {
+                const center = toScreen(e.cx, e.cy);
+                const radius = e.radius * scale;
+                ctx.arc(center.x, center.y, Math.max(1, radius), -e.startAngle, -e.endAngle, true);
+            } else if (e.type === 'text') {
+                const pos = toScreen(e.x, e.y);
+                ctx.fillStyle = '#00d4ff';
+                ctx.font = '6px sans-serif';
+                ctx.fillText('T', pos.x, pos.y);
+            }
+            ctx.stroke();
+        }
+    }
+
     // Remove entity with cache invalidation  
     removeEntity(entity) {
         const index = this.entities.indexOf(entity);
@@ -6504,6 +6825,12 @@ class WebCAD {
         this.invalidateSnapCache();
         this.clearSelection();
         this.centerView();
+        
+        // Reset history
+        this.history = [];
+        this.historyIndex = -1;
+        this.saveToHistory();
+        
         this.render();
     }
     
@@ -6559,6 +6886,12 @@ class WebCAD {
             }
             
             this.invalidateSnapCache();
+            
+            // Reset history after loading
+            this.history = [];
+            this.historyIndex = -1;
+            this.saveToHistory();
+            
             this.zoomExtents();
         } catch (err) {
             alert('Error loading file: ' + err.message);
@@ -6648,6 +6981,12 @@ class WebCAD {
             }
             
             this.invalidateSnapCache();
+            
+            // Reset history after loading
+            this.history = [];
+            this.historyIndex = -1;
+            this.saveToHistory();
+            
             this.zoomExtents();
         } catch (err) {
             alert('Error parsing DXF: ' + err.message);

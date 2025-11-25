@@ -382,15 +382,16 @@ body {
 /* Coordinates Display */
 .coords-display {
     position: absolute;
-    bottom: 48px;
+    bottom: 88px; /* Above history bar + status bar */
     left: 16px;
     display: flex;
     align-items: center;
     gap: 16px;
     padding: 8px 16px;
-    background: var(--bg-secondary)ee;
+    background: var(--bg-secondary);
     backdrop-filter: blur(8px);
     border: 1px solid var(--border-primary);
+    z-index: 15;
     border-radius: 8px;
     font-family: var(--font-mono);
     font-size: 13px;
@@ -877,5 +878,96 @@ body {
         padding: 0 8px;
         gap: 8px;
     }
+}
+
+/* ============================================
+   HISTORY BAR
+   ============================================ */
+
+.history-bar {
+    position: absolute;
+    bottom: 32px; /* Just above status bar */
+    left: 0;
+    right: 0;
+    height: 48px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-primary);
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    z-index: 10;
+}
+
+.history-bar::-webkit-scrollbar {
+    height: 4px;
+}
+
+.history-bar::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.history-bar::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.3);
+    border-radius: 2px;
+}
+
+.history-bar::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 212, 255, 0.5);
+}
+
+.history-item {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    border: 1px solid transparent;
+    opacity: 0.6;
+}
+
+.history-item:hover {
+    background: rgba(0, 212, 255, 0.15);
+    border-color: rgba(0, 212, 255, 0.3);
+    opacity: 1;
+}
+
+.history-item.active {
+    background: rgba(0, 212, 255, 0.2);
+    border-color: rgba(0, 212, 255, 0.6);
+    opacity: 1;
+}
+
+.history-item.future {
+    opacity: 0.3;
+}
+
+.history-item.future:hover {
+    opacity: 0.6;
+}
+
+.history-item canvas {
+    border-radius: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.history-item.active canvas {
+    border-color: rgba(0, 212, 255, 0.5);
+}
+
+.history-label {
+    font-size: 9px;
+    color: rgba(255, 255, 255, 0.5);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.history-item.active .history-label {
+    color: #00d4ff;
 }
 
