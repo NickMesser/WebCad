@@ -347,6 +347,58 @@ class Dimension extends Entity {
     }
 }
 
+class Text extends Entity {
+    constructor(x, y, text, height = 5, rotation = 0) {
+        super('text');
+        this.x = x;           // Insertion point X
+        this.y = y;           // Insertion point Y
+        this.text = text;     // Text content
+        this.height = height; // Text height in world units
+        this.rotation = rotation; // Rotation in radians
+    }
+    
+    getBounds() {
+        // Approximate bounds based on text height and estimated width
+        const estimatedWidth = this.text.length * this.height * 0.6;
+        const cos = Math.cos(this.rotation);
+        const sin = Math.sin(this.rotation);
+        
+        // Calculate rotated corners
+        const corners = [
+            { x: 0, y: 0 },
+            { x: estimatedWidth, y: 0 },
+            { x: estimatedWidth, y: this.height },
+            { x: 0, y: this.height }
+        ];
+        
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        
+        for (const corner of corners) {
+            const rx = this.x + corner.x * cos - corner.y * sin;
+            const ry = this.y + corner.x * sin + corner.y * cos;
+            minX = Math.min(minX, rx);
+            minY = Math.min(minY, ry);
+            maxX = Math.max(maxX, rx);
+            maxY = Math.max(maxY, ry);
+        }
+        
+        return { minX, minY, maxX, maxY };
+    }
+    
+    translate(dx, dy) {
+        this.x += dx;
+        this.y += dy;
+    }
+    
+    getCenter() {
+        const estimatedWidth = this.text.length * this.height * 0.6;
+        return {
+            x: this.x + estimatedWidth / 2,
+            y: this.y + this.height / 2
+        };
+    }
+}
+
 // ============================================
 // VIEW TRANSFORM
 // ============================================
@@ -561,6 +613,10 @@ class WebCAD {
             // Scale tool
             scaleBasePoint: null,
             scaleEntities: [],
+            // Rotate tool
+            rotateCenter: null,
+            rotateEntities: [],
+            rotateStartAngle: null,
             // Offset tool
             offsetEntity: null,
             offsetDistance: 10,
@@ -582,6 +638,11 @@ class WebCAD {
         
         // Tracking enabled state
         this.trackingEnabled = true;
+        
+        // Performance optimization
+        this.renderPending = false;
+        this.snapPointsCache = null;
+        this.snapPointsCacheValid = false;
         
         // Dimension input state
         this.dimInputVisible = false;
@@ -926,6 +987,11 @@ class WebCAD {
     
     // Get all snap points from all entities
     getAllSnapPoints() {
+        // Use cached snap points if available
+        if (this.snapPointsCacheValid && this.snapPointsCache) {
+            return this.snapPointsCache;
+        }
+        
         const points = [];
         
         for (const entity of this.entities) {
@@ -959,8 +1025,14 @@ class WebCAD {
                     y: (entity.y1 + entity.y2) / 2, 
                     type: 'center' 
                 });
+            } else if (entity.type === 'text') {
+                points.push({ x: entity.x, y: entity.y, type: 'insertion' });
             }
         }
+        
+        // Cache the results
+        this.snapPointsCache = points;
+        this.snapPointsCacheValid = true;
         
         return points;
     }
@@ -1213,15 +1285,14 @@ class WebCAD {
         let bestSnap = null;
         let bestDist = tolerance;
         
-        for (const entity of this.entities) {
-            const snapPoints = this.getEntitySnapPoints(entity);
-            
-            for (const snap of snapPoints) {
-                const dist = Math.hypot(worldPoint.x - snap.x, worldPoint.y - snap.y);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestSnap = snap;
-                }
+        // Use cached snap points for better performance
+        const allSnapPoints = this.getAllSnapPoints();
+        
+        for (const snap of allSnapPoints) {
+            const dist = Math.hypot(worldPoint.x - snap.x, worldPoint.y - snap.y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestSnap = snap;
             }
         }
         
@@ -1271,6 +1342,9 @@ class WebCAD {
             // Dimension endpoints
             points.push({ x: entity.x1, y: entity.y1, type: 'endpoint' });
             points.push({ x: entity.x2, y: entity.y2, type: 'endpoint' });
+        } else if (entity.type === 'text') {
+            // Text insertion point
+            points.push({ x: entity.x, y: entity.y, type: 'insertion' });
         }
         
         return points;
@@ -1309,7 +1383,7 @@ class WebCAD {
             const dy = e.clientY - this.panStart.y;
             this.view.pan(dx, dy);
             this.panStart = { x: e.clientX, y: e.clientY };
-            this.render();
+            this.requestRender();
             return;
         }
         
@@ -1326,7 +1400,7 @@ class WebCAD {
             this.updateHover();
         }
         
-        this.render();
+        this.requestRender();
     }
     
     onMouseUp(e) {
@@ -1352,12 +1426,14 @@ class WebCAD {
             this.toolState.isGripDragging = false;
             this.toolState.activeGrip = null;
             this.toolState.dragStart = null;
+            this.invalidateSnapCache();
         }
         
         // Handle drag end
         if (this.toolState.isDragging) {
             this.toolState.isDragging = false;
             this.toolState.dragStart = null;
+            this.invalidateSnapCache();
         }
     }
     
@@ -1423,6 +1499,17 @@ class WebCAD {
             return;
         }
         
+        // Allow typing rotation angle when center point is set
+        if (this.currentTool === 'rotate' && this.toolState.rotateCenter && (e.key.match(/[0-9.]/) || e.key === '-')) {
+            e.preventDefault();
+            this.showDimensionInput('rotate');
+            const rotateInput = document.getElementById('inputRotation');
+            if (rotateInput) {
+                rotateInput.value = e.key;
+            }
+            return;
+        }
+        
         // Tool shortcuts
         const toolKeys = {
             'v': 'select',
@@ -1431,10 +1518,12 @@ class WebCAD {
             'c': 'circle',
             'a': 'arc',
             'd': 'dimension',
+            'x': 'text',
             't': 'trim',
             'e': 'extend',
             'f': 'offset',
             'g': 'scale',
+            'o': 'rotate',
             'p': 'rectPattern'
         };
         
@@ -1498,10 +1587,13 @@ class WebCAD {
         lineFields.style.display = 'none';
         rectFields.style.display = 'none';
         document.getElementById('circleInputFields').style.display = 'none';
+        document.getElementById('textInputFields').style.display = 'none';
         const offsetFields = document.getElementById('offsetInputFields');
         const scaleFields = document.getElementById('scaleInputFields');
+        const rotateFields = document.getElementById('rotateInputFields');
         if (offsetFields) offsetFields.style.display = 'none';
         if (scaleFields) scaleFields.style.display = 'none';
+        if (rotateFields) rotateFields.style.display = 'none';
         
         if (this.currentTool === 'line') {
             // Show line input fields
@@ -1631,6 +1723,20 @@ class WebCAD {
             this.dimInputType = 'scale';
             scaleInput.focus();
             scaleInput.select();
+        } else if (initialKey === 'rotate') {
+            // Show rotate input fields
+            const rotateFields = document.getElementById('rotateInputFields');
+            if (rotateFields) rotateFields.style.display = 'flex';
+            title.textContent = 'Enter Rotation Angle';
+            
+            const rotateInput = document.getElementById('inputRotation');
+            rotateInput.value = '0';
+            
+            panel.classList.add('visible');
+            this.dimInputVisible = true;
+            this.dimInputType = 'rotate';
+            rotateInput.focus();
+            rotateInput.select();
         }
     }
     
@@ -1830,6 +1936,7 @@ class WebCAD {
                     endY
                 );
                 this.entities.push(line);
+                this.invalidateSnapCache();
                 
                 // Continue from end point (continuous mode)
                 this.toolState.startPoint = { x: endX, y: endY };
@@ -1869,6 +1976,7 @@ class WebCAD {
                 this.entities.push(new Line(x2, y2, x1, y2)); // Top
                 this.entities.push(new Line(x1, y2, x1, y1)); // Left
                 
+                this.invalidateSnapCache();
                 this.toolState.startPoint = null;
                 this.toolState.previewPoint = null;
             }
@@ -1892,6 +2000,7 @@ class WebCAD {
                     radius
                 );
                 this.entities.push(circle);
+                this.invalidateSnapCache();
                 this.toolState.startPoint = null;
                 this.toolState.previewPoint = null;
             }
@@ -1923,11 +2032,26 @@ class WebCAD {
             // Apply scale factor
             this.applyScale(scaleValue);
             return;
+        } else if (this.dimInputType === 'rotate') {
+            const rotateInput = document.getElementById('inputRotation');
+            const angleValue = parseFloat(rotateInput.value);
+            
+            if (isNaN(angleValue)) {
+                rotateInput.focus();
+                return;
+            }
+            
+            // Apply rotation angle (convert degrees to radians)
+            this.applyRotation(angleValue * Math.PI / 180);
+            return;
         } else if (this.dimInputType === 'rectPattern') {
             this.applyRectPattern();
             return;
         } else if (this.dimInputType === 'circPattern') {
             this.applyCircPattern();
+            return;
+        } else if (this.dimInputType === 'text') {
+            this.applyText();
             return;
         }
         
@@ -1953,6 +2077,9 @@ class WebCAD {
         this.toolState.isSelectionBox = false;
         this.toolState.scaleBasePoint = null;
         this.toolState.scaleEntities = [];
+        this.toolState.rotateCenter = null;
+        this.toolState.rotateEntities = [];
+        this.toolState.rotateStartAngle = null;
         this.toolState.offsetEntity = null;
         this.toolState.arcPoint1 = null;
         this.toolState.arcPoint2 = null;
@@ -1981,6 +2108,8 @@ class WebCAD {
             this.toolState.selectionBoxStart ||
             this.toolState.scaleBasePoint ||
             this.toolState.scaleEntities.length > 0 ||
+            this.toolState.rotateCenter ||
+            this.toolState.rotateEntities.length > 0 ||
             this.toolState.offsetEntity ||
             this.toolState.arcPoint1 ||
             this.toolState.arcPoint2 ||
@@ -1998,6 +2127,9 @@ class WebCAD {
             this.toolState.isSelectionBox = false;
             this.toolState.scaleBasePoint = null;
             this.toolState.scaleEntities = [];
+            this.toolState.rotateCenter = null;
+            this.toolState.rotateEntities = [];
+            this.toolState.rotateStartAngle = null;
             this.toolState.offsetEntity = null;
             this.toolState.arcPoint1 = null;
             this.toolState.arcPoint2 = null;
@@ -2092,6 +2224,9 @@ class WebCAD {
             case 'dimension':
                 hint = this.toolState.startPoint ? 'Click second point' : 'Click first point';
                 break;
+            case 'text':
+                hint = 'Click to place text, then type to enter content';
+                break;
             case 'trim':
                 hint = 'Hover over line segment to preview, click to trim (red = removed)';
                 break;
@@ -2112,6 +2247,17 @@ class WebCAD {
                     hint = 'Click base point for scaling';
                 } else {
                     hint = 'Click second point or type scale factor';
+                }
+                break;
+            case 'rotate':
+                if (this.toolState.rotateEntities.length === 0) {
+                    hint = 'Select entities to rotate, then press Enter';
+                } else if (!this.toolState.rotateCenter) {
+                    hint = 'Click center point for rotation';
+                } else if (this.toolState.rotateStartAngle === null) {
+                    hint = 'Move mouse away from center to start rotating';
+                } else {
+                    hint = 'Move mouse to rotate, click to apply, or type angle';
                 }
                 break;
             case 'rectPattern':
@@ -2164,6 +2310,9 @@ class WebCAD {
             case 'dimension':
                 this.handleDimensionClick(point);
                 break;
+            case 'text':
+                this.handleTextClick(point);
+                break;
             case 'trim':
                 this.handleTrimClick(point);
                 break;
@@ -2175,6 +2324,9 @@ class WebCAD {
                 break;
             case 'scale':
                 this.handleScaleClick(point);
+                break;
+            case 'rotate':
+                this.handleRotateClick(point);
                 break;
             case 'rectPattern':
                 this.handleRectPatternClick(point);
@@ -2190,6 +2342,20 @@ class WebCAD {
     handleToolMove() {
         if (this.toolState.startPoint) {
             this.toolState.previewPoint = { ...this.mouse.snapped };
+        }
+        
+        // Set rotation start angle on first mouse move after center is set
+        if (this.currentTool === 'rotate' && 
+            this.toolState.rotateCenter && 
+            this.toolState.rotateEntities.length > 0 &&
+            this.toolState.rotateStartAngle === null) {
+            // Set start angle based on current mouse position relative to center
+            const dx = this.mouse.world.x - this.toolState.rotateCenter.x;
+            const dy = this.mouse.world.y - this.toolState.rotateCenter.y;
+            // Only set if mouse is far enough from center
+            if (Math.hypot(dx, dy) > 5 / this.view.scale) {
+                this.toolState.rotateStartAngle = Math.atan2(dy, dx);
+            }
         }
         
         // Handle grip dragging (endpoint editing)
@@ -2335,6 +2501,8 @@ class WebCAD {
         } else if (entity.type === 'dim') {
             grips.push({ x: entity.x1, y: entity.y1, type: 'start' });
             grips.push({ x: entity.x2, y: entity.y2, type: 'end' });
+        } else if (entity.type === 'text') {
+            grips.push({ x: entity.x, y: entity.y, type: 'insertion' });
         }
         
         return grips;
@@ -2406,6 +2574,11 @@ class WebCAD {
                 entity.x2 = newPos.x;
                 entity.y2 = newPos.y;
             }
+        } else if (entity.type === 'text') {
+            if (gripType === 'insertion') {
+                entity.x = newPos.x;
+                entity.y = newPos.y;
+            }
         }
     }
     
@@ -2426,6 +2599,17 @@ class WebCAD {
         // Test in reverse order (top entities first)
         for (let i = this.entities.length - 1; i >= 0; i--) {
             const entity = this.entities[i];
+            
+            // Quick bounding box check for early rejection
+            const bounds = this.getEntityBounds(entity);
+            if (bounds) {
+                if (worldPoint.x < bounds.minX - tolerance ||
+                    worldPoint.x > bounds.maxX + tolerance ||
+                    worldPoint.y < bounds.minY - tolerance ||
+                    worldPoint.y > bounds.maxY + tolerance) {
+                    continue;
+                }
+            }
             
             if (entity.type === 'line') {
                 const dist = Geometry.pointToLineDistance(
@@ -2466,6 +2650,15 @@ class WebCAD {
                     entity.x1, entity.y1, entity.x2, entity.y2
                 );
                 if (dist <= tolerance + entity.offset) return entity;
+            } else if (entity.type === 'text') {
+                // Hit test text bounding box
+                const bounds = entity.getBounds();
+                if (worldPoint.x >= bounds.minX - tolerance && 
+                    worldPoint.x <= bounds.maxX + tolerance &&
+                    worldPoint.y >= bounds.minY - tolerance && 
+                    worldPoint.y <= bounds.maxY + tolerance) {
+                    return entity;
+                }
             }
         }
         
@@ -2531,6 +2724,10 @@ class WebCAD {
                    entity.y1 >= minY && entity.y1 <= maxY &&
                    entity.x2 >= minX && entity.x2 <= maxX &&
                    entity.y2 >= minY && entity.y2 <= maxY;
+        } else if (entity.type === 'text') {
+            const bounds = entity.getBounds();
+            return bounds.minX >= minX && bounds.maxX <= maxX &&
+                   bounds.minY >= minY && bounds.maxY <= maxY;
         }
         return false;
     }
@@ -2556,6 +2753,9 @@ class WebCAD {
             return this.circleIntersectsBox(entity.cx, entity.cy, entity.radius, minX, minY, maxX, maxY);
         } else if (entity.type === 'dim') {
             return this.lineIntersectsBox(entity.x1, entity.y1, entity.x2, entity.y2, minX, minY, maxX, maxY);
+        } else if (entity.type === 'text') {
+            const bounds = entity.getBounds();
+            return !(bounds.maxX < minX || bounds.minX > maxX || bounds.maxY < minY || bounds.minY > maxY);
         }
         return false;
     }
@@ -2595,6 +2795,7 @@ class WebCAD {
     deleteSelected() {
         this.entities = this.entities.filter(e => !e.selected);
         this.toolState.selectedEntities = [];
+        this.invalidateSnapCache();
         document.getElementById('propertiesPanel').classList.remove('open');
         this.render();
     }
@@ -2618,6 +2819,7 @@ class WebCAD {
                 point.y
             );
             this.entities.push(line);
+            this.invalidateSnapCache();
             
             // Continuous mode: end point becomes new start point
             // User presses Escape to exit
@@ -2653,11 +2855,12 @@ class WebCAD {
             // Left line
             this.entities.push(new Line(x1, y2, x1, y1));
             
+            this.invalidateSnapCache();
             this.toolState.startPoint = null;
             this.toolState.previewPoint = null;
         }
     }
-    
+
     // ----------------------------------------
     // CIRCLE TOOL
     // ----------------------------------------
@@ -2682,6 +2885,7 @@ class WebCAD {
                     radius
                 );
                 this.entities.push(circle);
+                this.invalidateSnapCache();
             }
             
             this.toolState.startPoint = null;
@@ -2712,6 +2916,7 @@ class WebCAD {
             
             if (arc) {
                 this.entities.push(arc);
+                this.invalidateSnapCache();
             }
             
             // Reset for next arc
@@ -2803,9 +3008,76 @@ class WebCAD {
                 point.y
             );
             this.entities.push(dim);
+            this.invalidateSnapCache();
             this.toolState.startPoint = null;
             this.toolState.previewPoint = null;
         }
+    }
+    
+    // ----------------------------------------
+    // TEXT TOOL
+    // ----------------------------------------
+    
+    handleTextClick(point) {
+        // Store the text insertion point
+        this.toolState.textInsertPoint = { ...point };
+        
+        // Show text input dialog
+        this.showTextInput();
+    }
+    
+    showTextInput() {
+        this.dimInputVisible = true;
+        this.dimInputType = 'text';
+        const panel = document.getElementById('dimensionInput');
+        panel.classList.add('visible');
+        
+        // Hide all field sets
+        document.getElementById('lineInputFields').style.display = 'none';
+        document.getElementById('rectInputFields').style.display = 'none';
+        document.getElementById('circleInputFields').style.display = 'none';
+        document.getElementById('textInputFields').style.display = 'block';
+        document.getElementById('offsetInputFields').style.display = 'none';
+        document.getElementById('scaleInputFields').style.display = 'none';
+        document.getElementById('rectPatternFields').style.display = 'none';
+        document.getElementById('circPatternFields').style.display = 'none';
+        
+        // Update title
+        document.getElementById('dimInputTitle').textContent = 'Enter Text';
+        
+        // Update units
+        document.getElementById('textHeightUnit').textContent = Units.currentUnit;
+        
+        // Clear and focus text input, reset rotation to 0
+        const textInput = document.getElementById('inputText');
+        textInput.value = '';
+        document.getElementById('inputTextRotation').value = '0';
+        textInput.focus();
+    }
+    
+    applyText() {
+        const textContent = document.getElementById('inputText').value.trim();
+        if (!textContent || !this.toolState.textInsertPoint) {
+            this.hideDimensionInput();
+            return;
+        }
+        
+        const height = Units.toInternal(parseFloat(document.getElementById('inputTextHeight').value) || 5);
+        const rotation = (parseFloat(document.getElementById('inputTextRotation').value) || 0) * Math.PI / 180;
+        
+        const text = new Text(
+            this.toolState.textInsertPoint.x,
+            this.toolState.textInsertPoint.y,
+            textContent,
+            height,
+            rotation
+        );
+        
+        this.entities.push(text);
+        this.invalidateSnapCache();
+        this.toolState.textInsertPoint = null;
+        this.hideDimensionInput();
+        this.render();
     }
     
     // ----------------------------------------
@@ -2876,6 +3148,7 @@ class WebCAD {
                 }
             }
             
+            this.invalidateSnapCache();
             this.toolState.trimPreview = null;
             this.render();
         }
@@ -3764,6 +4037,8 @@ class WebCAD {
             }
         }
         
+        this.invalidateSnapCache();
+        
         // Keep the entity selected for multiple offsets
         this.toolState.offsetEntity = entity;
         this.render();
@@ -3832,11 +4107,21 @@ class WebCAD {
                 entity.cx = basePoint.x + (entity.cx - basePoint.x) * scaleFactor;
                 entity.cy = basePoint.y + (entity.cy - basePoint.y) * scaleFactor;
                 entity.radius *= scaleFactor;
+            } else if (entity.type === 'arc') {
+                // Scale arc center and radius (angles stay the same)
+                entity.cx = basePoint.x + (entity.cx - basePoint.x) * scaleFactor;
+                entity.cy = basePoint.y + (entity.cy - basePoint.y) * scaleFactor;
+                entity.radius *= scaleFactor;
             } else if (entity.type === 'rect') {
                 // Scale rectangle
+                entity.x1 = basePoint.x + (entity.x1 - basePoint.x) * scaleFactor;
+                entity.y1 = basePoint.y + (entity.y1 - basePoint.y) * scaleFactor;
+                entity.x2 = basePoint.x + (entity.x2 - basePoint.x) * scaleFactor;
+                entity.y2 = basePoint.y + (entity.y2 - basePoint.y) * scaleFactor;
+            } else if (entity.type === 'text') {
+                // Scale text position and size
                 entity.x = basePoint.x + (entity.x - basePoint.x) * scaleFactor;
                 entity.y = basePoint.y + (entity.y - basePoint.y) * scaleFactor;
-                entity.width *= scaleFactor;
                 entity.height *= scaleFactor;
             }
             entity.selected = false;
@@ -3845,6 +4130,79 @@ class WebCAD {
         // Reset scale tool
         this.toolState.scaleEntities = [];
         this.toolState.scaleBasePoint = null;
+        this.hideDimensionInput();
+        this.render();
+    }
+    
+    // ----------------------------------------
+    // ROTATE TOOL
+    // ----------------------------------------
+    
+    handleRotateClick(point) {
+        if (this.toolState.rotateEntities.length === 0) {
+            // Check if there are already selected entities
+            const selected = this.entities.filter(e => e.selected);
+            if (selected.length > 0) {
+                this.toolState.rotateEntities = selected;
+                this.updateStatus();
+            } else {
+                // First: select entity to rotate
+                const hitEntity = this.hitTest(this.mouse.world);
+                if (hitEntity) {
+                    hitEntity.selected = true;
+                    this.toolState.rotateEntities = [hitEntity];
+                    this.updateStatus();
+                }
+            }
+        } else if (!this.toolState.rotateCenter) {
+            // Second: set center point
+            this.toolState.rotateCenter = { ...point };
+            // Start angle will be set on first mouse move
+            this.toolState.rotateStartAngle = null;
+            this.updateStatus();
+        } else {
+            // Third: apply rotation based on mouse position
+            const angle = Math.atan2(
+                point.y - this.toolState.rotateCenter.y,
+                point.x - this.toolState.rotateCenter.x
+            );
+            
+            const deltaAngle = angle - this.toolState.rotateStartAngle;
+            this.applyRotation(deltaAngle);
+        }
+    }
+    
+    getRotatePreviewAngle() {
+        if (!this.toolState.rotateCenter || 
+            this.toolState.rotateEntities.length === 0 ||
+            this.toolState.rotateStartAngle === null) {
+            return 0;
+        }
+        
+        const currentAngle = Math.atan2(
+            this.mouse.world.y - this.toolState.rotateCenter.y,
+            this.mouse.world.x - this.toolState.rotateCenter.x
+        );
+        
+        return currentAngle - this.toolState.rotateStartAngle;
+    }
+    
+    applyRotation(angle) {
+        if (!this.toolState.rotateCenter) return;
+        
+        const center = this.toolState.rotateCenter;
+        
+        this.toolState.rotateEntities.forEach(entity => {
+            this.rotateEntityAroundPoint(entity, center, angle);
+            entity.selected = false;
+        });
+        
+        this.invalidateSnapCache();
+        
+        // Reset rotate tool
+        this.toolState.rotateEntities = [];
+        this.toolState.rotateCenter = null;
+        this.toolState.rotateStartAngle = null;
         this.hideDimensionInput();
         this.render();
     }
@@ -4013,6 +4371,8 @@ class WebCAD {
         // Deselect original entities
         sourceEntities.forEach(e => e.selected = false);
         
+        this.invalidateSnapCache();
+        
         // Reset pattern tool
         this.toolState.patternEntities = [];
         this.toolState.patternBasePoint = null;
@@ -4064,6 +4424,8 @@ class WebCAD {
         // Deselect original entities
         sourceEntities.forEach(e => e.selected = false);
         
+        this.invalidateSnapCache();
+        
         // Reset pattern tool
         this.toolState.patternEntities = [];
         this.toolState.patternBasePoint = null;
@@ -4071,7 +4433,7 @@ class WebCAD {
         this.hideDimensionInput();
         this.render();
     }
-    
+
     cloneEntity(entity) {
         if (entity.type === 'line') {
             return new Line(entity.x1, entity.y1, entity.x2, entity.y2);
@@ -4085,6 +4447,8 @@ class WebCAD {
             const dim = new Dimension(entity.x1, entity.y1, entity.x2, entity.y2);
             dim.offset = entity.offset;
             return dim;
+        } else if (entity.type === 'text') {
+            return new Text(entity.x, entity.y, entity.text, entity.height, entity.rotation);
         }
         return null;
     }
@@ -4126,6 +4490,11 @@ class WebCAD {
             entity.y1 = p1.y;
             entity.x2 = p2.x;
             entity.y2 = p2.y;
+        } else if (entity.type === 'text') {
+            const newPos = rotatePoint(entity.x, entity.y);
+            entity.x = newPos.x;
+            entity.y = newPos.y;
+            entity.rotation += angle;
         }
     }
     
@@ -4217,9 +4586,14 @@ class WebCAD {
         // Draw axes
         this.drawAxes(width, height);
         
-        // Draw entities
+        // Calculate visible bounds for culling
+        const visibleBounds = this.getVisibleBounds();
+        
+        // Draw entities (with view culling for performance)
         for (const entity of this.entities) {
-            this.drawEntity(entity);
+            if (this.isEntityVisible(entity, visibleBounds)) {
+                this.drawEntity(entity);
+            }
         }
         
         // Draw preview
@@ -4237,6 +4611,9 @@ class WebCAD {
         // Draw scale preview
         this.drawScalePreview();
         
+        // Draw rotate preview
+        this.drawRotatePreview();
+        
         // Draw pattern preview
         this.drawPatternPreview();
         
@@ -4248,6 +4625,112 @@ class WebCAD {
         
         // Draw crosshair at cursor
         this.drawCrosshair();
+    }
+    
+    // Throttled render - uses requestAnimationFrame to limit render calls
+    requestRender() {
+        if (this.renderPending) return;
+        this.renderPending = true;
+        requestAnimationFrame(() => {
+            this.renderPending = false;
+            this.render();
+        });
+    }
+    
+    // Invalidate snap points cache when entities change
+    invalidateSnapCache() {
+        this.snapPointsCacheValid = false;
+        this.snapPointsCache = null;
+    }
+    
+    // Add entity with cache invalidation
+    addEntity(entity) {
+        this.entities.push(entity);
+        this.invalidateSnapCache();
+    }
+    
+    // Remove entity with cache invalidation  
+    removeEntity(entity) {
+        const index = this.entities.indexOf(entity);
+        if (index > -1) {
+            this.entities.splice(index, 1);
+            this.invalidateSnapCache();
+        }
+    }
+    
+    // Get visible world bounds for culling
+    getVisibleBounds() {
+        const topLeft = this.view.screenToWorld(0, 0);
+        const bottomRight = this.view.screenToWorld(this.canvas.width, this.canvas.height);
+        
+        // Add padding to avoid popping at edges
+        const padding = 50 / this.view.scale;
+        
+        return {
+            minX: Math.min(topLeft.x, bottomRight.x) - padding,
+            maxX: Math.max(topLeft.x, bottomRight.x) + padding,
+            minY: Math.min(topLeft.y, bottomRight.y) - padding,
+            maxY: Math.max(topLeft.y, bottomRight.y) + padding
+        };
+    }
+    
+    // Check if entity is within visible bounds
+    isEntityVisible(entity, bounds) {
+        const entityBounds = this.getEntityBounds(entity);
+        if (!entityBounds) return true; // Draw if can't determine bounds
+        
+        // Check for intersection of bounding boxes
+        return !(entityBounds.maxX < bounds.minX || 
+                 entityBounds.minX > bounds.maxX ||
+                 entityBounds.maxY < bounds.minY || 
+                 entityBounds.minY > bounds.maxY);
+    }
+    
+    // Get bounding box of an entity
+    getEntityBounds(entity) {
+        switch (entity.type) {
+            case 'line':
+                return {
+                    minX: Math.min(entity.x1, entity.x2),
+                    maxX: Math.max(entity.x1, entity.x2),
+                    minY: Math.min(entity.y1, entity.y2),
+                    maxY: Math.max(entity.y1, entity.y2)
+                };
+            case 'rect':
+                return {
+                    minX: Math.min(entity.x1, entity.x2),
+                    maxX: Math.max(entity.x1, entity.x2),
+                    minY: Math.min(entity.y1, entity.y2),
+                    maxY: Math.max(entity.y1, entity.y2)
+                };
+            case 'circle':
+                return {
+                    minX: entity.cx - entity.radius,
+                    maxX: entity.cx + entity.radius,
+                    minY: entity.cy - entity.radius,
+                    maxY: entity.cy + entity.radius
+                };
+            case 'arc':
+                // For arcs, use full circle bounds (slightly over-inclusive but fast)
+                return {
+                    minX: entity.cx - entity.radius,
+                    maxX: entity.cx + entity.radius,
+                    minY: entity.cy - entity.radius,
+                    maxY: entity.cy + entity.radius
+                };
+            case 'dim':
+                const offset = Math.abs(entity.offset || 20);
+                return {
+                    minX: Math.min(entity.x1, entity.x2) - offset,
+                    maxX: Math.max(entity.x1, entity.x2) + offset,
+                    minY: Math.min(entity.y1, entity.y2) - offset,
+                    maxY: Math.max(entity.y1, entity.y2) + offset
+                };
+            case 'text':
+                return entity.getBounds();
+            default:
+                return null;
+        }
     }
     
     drawGrid(width, height) {
@@ -4276,51 +4759,64 @@ class WebCAD {
         
         const majorGridSize = gridSize * 5;
         
-        // Draw minor grid
-        ctx.strokeStyle = CONFIG.colors.gridMinor;
-        ctx.lineWidth = 0.5;
-        ctx.beginPath();
+        // Limit grid lines to prevent slowdown
+        const maxGridLines = 200;
+        const numXLines = (maxX - minX) / gridSize;
+        const numYLines = (maxY - minY) / gridSize;
         
-        const startX = Math.floor(minX / gridSize) * gridSize;
-        const startY = Math.floor(minY / gridSize) * gridSize;
+        // Skip minor grid if too many lines
+        if (numXLines < maxGridLines && numYLines < maxGridLines) {
+            // Draw minor grid
+            ctx.strokeStyle = CONFIG.colors.gridMinor;
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            
+            const startX = Math.floor(minX / gridSize) * gridSize;
+            const startY = Math.floor(minY / gridSize) * gridSize;
+            
+            for (let x = startX; x <= maxX; x += gridSize) {
+                if (x % majorGridSize !== 0) {
+                    const screen = this.view.worldToScreen(x, 0);
+                    ctx.moveTo(screen.x, 0);
+                    ctx.lineTo(screen.x, height);
+                }
+            }
+            
+            for (let y = startY; y <= maxY; y += gridSize) {
+                if (y % majorGridSize !== 0) {
+                    const screen = this.view.worldToScreen(0, y);
+                    ctx.moveTo(0, screen.y);
+                    ctx.lineTo(width, screen.y);
+                }
+            }
+            ctx.stroke();
+        }
         
-        for (let x = startX; x <= maxX; x += gridSize) {
-            if (x % majorGridSize !== 0) {
+        // Draw major grid
+        const numMajorXLines = (maxX - minX) / majorGridSize;
+        const numMajorYLines = (maxY - minY) / majorGridSize;
+        
+        if (numMajorXLines < maxGridLines && numMajorYLines < maxGridLines) {
+            ctx.strokeStyle = CONFIG.colors.gridMajor;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            
+            const majorStartX = Math.floor(minX / majorGridSize) * majorGridSize;
+            const majorStartY = Math.floor(minY / majorGridSize) * majorGridSize;
+            
+            for (let x = majorStartX; x <= maxX; x += majorGridSize) {
                 const screen = this.view.worldToScreen(x, 0);
                 ctx.moveTo(screen.x, 0);
                 ctx.lineTo(screen.x, height);
             }
-        }
-        
-        for (let y = startY; y <= maxY; y += gridSize) {
-            if (y % majorGridSize !== 0) {
+            
+            for (let y = majorStartY; y <= maxY; y += majorGridSize) {
                 const screen = this.view.worldToScreen(0, y);
                 ctx.moveTo(0, screen.y);
                 ctx.lineTo(width, screen.y);
             }
+            ctx.stroke();
         }
-        ctx.stroke();
-        
-        // Draw major grid
-        ctx.strokeStyle = CONFIG.colors.gridMajor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        
-        const majorStartX = Math.floor(minX / majorGridSize) * majorGridSize;
-        const majorStartY = Math.floor(minY / majorGridSize) * majorGridSize;
-        
-        for (let x = majorStartX; x <= maxX; x += majorGridSize) {
-            const screen = this.view.worldToScreen(x, 0);
-            ctx.moveTo(screen.x, 0);
-            ctx.lineTo(screen.x, height);
-        }
-        
-        for (let y = majorStartY; y <= maxY; y += majorGridSize) {
-            const screen = this.view.worldToScreen(0, y);
-            ctx.moveTo(0, screen.y);
-            ctx.lineTo(width, screen.y);
-        }
-        ctx.stroke();
     }
     
     drawAxes(width, height) {
@@ -4378,6 +4874,9 @@ class WebCAD {
             case 'dim':
                 this.drawDimension(entity);
                 break;
+            case 'text':
+                this.drawText(entity);
+                break;
         }
     }
     
@@ -4401,6 +4900,34 @@ class WebCAD {
         ctx.beginPath();
         ctx.arc(center.x, center.y, radiusScreen, -arc.startAngle, -arc.endAngle, true);
         ctx.stroke();
+    }
+    
+    drawText(text) {
+        const ctx = this.ctx;
+        const pos = this.view.worldToScreen(text.x, text.y);
+        const heightScreen = text.height * this.view.scale;
+        
+        // Don't draw if too small to read
+        if (heightScreen < 3) return;
+        
+        ctx.save();
+        
+        // Move to text position
+        ctx.translate(pos.x, pos.y);
+        
+        // Apply rotation (negative because screen Y is inverted)
+        ctx.rotate(-text.rotation);
+        
+        // Set font - scale based on text height
+        const fontSize = Math.max(8, heightScreen);
+        ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
+        ctx.textBaseline = 'bottom';
+        ctx.textAlign = 'left';
+        
+        // Draw text (in screen coords, Y is inverted so we draw "up")
+        ctx.fillText(text.text, 0, 0);
+        
+        ctx.restore();
     }
     
     drawLine(line) {
@@ -5514,6 +6041,127 @@ class WebCAD {
         }
     }
     
+    drawRotatePreview() {
+        if (this.currentTool !== 'rotate') return;
+        
+        const ctx = this.ctx;
+        
+        // Highlight selected entities
+        this.toolState.rotateEntities.forEach(entity => {
+            this.drawEntityHighlight(entity, '#58a6ff');
+        });
+        
+        // Draw center point if set
+        if (this.toolState.rotateCenter) {
+            const center = this.view.worldToScreen(this.toolState.rotateCenter.x, this.toolState.rotateCenter.y);
+            
+            // Draw center point marker (rotation symbol)
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.fillStyle = '#ff6b6b';
+            ctx.lineWidth = 2;
+            
+            // Draw circle at center
+            const radius = 8;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            // Draw crosshair
+            ctx.beginPath();
+            ctx.moveTo(center.x - 4, center.y);
+            ctx.lineTo(center.x + 4, center.y);
+            ctx.moveTo(center.x, center.y - 4);
+            ctx.lineTo(center.x, center.y + 4);
+            ctx.stroke();
+            
+            // Draw reference line to mouse and show angle
+            if (this.toolState.rotateEntities.length > 0) {
+                const mouseScreen = this.view.worldToScreen(this.mouse.world.x, this.mouse.world.y);
+                const dist = Math.hypot(mouseScreen.x - center.x, mouseScreen.y - center.y);
+                
+                // Draw angle arc and reference line
+                if (this.toolState.rotateStartAngle !== null) {
+                    const currentAngle = Math.atan2(
+                        this.mouse.world.y - this.toolState.rotateCenter.y,
+                        this.mouse.world.x - this.toolState.rotateCenter.x
+                    );
+                    
+                    // Draw start reference line (dashed, lighter)
+                    const refDist = Math.max(40, dist * 0.6);
+                    const refX = center.x + refDist * Math.cos(-this.toolState.rotateStartAngle);
+                    const refY = center.y + refDist * Math.sin(-this.toolState.rotateStartAngle);
+                    ctx.strokeStyle = 'rgba(255, 107, 107, 0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+                    ctx.beginPath();
+                    ctx.moveTo(center.x, center.y);
+                    ctx.lineTo(refX, refY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    
+                    // Draw angle arc
+                    if (dist > 20) {
+                        const startAngle = -this.toolState.rotateStartAngle;
+                        const endAngle = -currentAngle;
+                        const arcRadius = Math.min(50, dist * 0.5);
+                        
+                        ctx.strokeStyle = 'rgba(255, 107, 107, 0.5)';
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.arc(center.x, center.y, arcRadius, startAngle, endAngle, startAngle > endAngle);
+                        ctx.stroke();
+                    }
+                }
+                
+                // Draw line to mouse
+                ctx.strokeStyle = '#ff6b6b';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(center.x, center.y);
+                ctx.lineTo(mouseScreen.x, mouseScreen.y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                
+                // Show angle text
+                if (this.toolState.rotateStartAngle !== null) {
+                    const currentAngle = Math.atan2(
+                        this.mouse.world.y - this.toolState.rotateCenter.y,
+                        this.mouse.world.x - this.toolState.rotateCenter.x
+                    );
+                    let angleDeg = (currentAngle - this.toolState.rotateStartAngle) * 180 / Math.PI;
+                    // Normalize to -180 to 180
+                    while (angleDeg > 180) angleDeg -= 360;
+                    while (angleDeg < -180) angleDeg += 360;
+                    
+                    ctx.font = '12px "JetBrains Mono", monospace';
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.fillText(`${angleDeg.toFixed(1)}°`, center.x + 15, center.y - 15);
+                }
+                
+                // Draw rotated preview of entities
+                if (this.toolState.rotateStartAngle !== null) {
+                    const previewAngle = this.getRotatePreviewAngle();
+                    
+                    ctx.globalAlpha = 0.5;
+                    ctx.setLineDash([5, 5]);
+                    
+                    for (const entity of this.toolState.rotateEntities) {
+                        // Clone and rotate for preview
+                        const preview = this.cloneEntity(entity);
+                        if (preview) {
+                            this.rotateEntityAroundPoint(preview, this.toolState.rotateCenter, previewAngle);
+                            this.drawEntityPreview(preview, '#ff6b6b');
+                        }
+                    }
+                    
+                    ctx.globalAlpha = 1.0;
+                    ctx.setLineDash([]);
+                }
+            }
+        }
+    }
+    
     drawPatternPreview() {
         if (this.currentTool !== 'rectPattern' && this.currentTool !== 'circPattern') return;
         
@@ -5622,6 +6270,24 @@ class WebCAD {
             ctx.lineTo(p1.x, p2.y);
             ctx.closePath();
             ctx.stroke();
+        } else if (entity.type === 'text') {
+            const pos = this.view.worldToScreen(entity.x, entity.y);
+            const heightScreen = entity.height * this.view.scale;
+            
+            if (heightScreen >= 3) {
+                ctx.save();
+                ctx.translate(pos.x, pos.y);
+                ctx.rotate(-entity.rotation);
+                
+                const fontSize = Math.max(8, heightScreen);
+                ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
+                ctx.textBaseline = 'bottom';
+                ctx.textAlign = 'left';
+                ctx.fillStyle = color;
+                ctx.fillText(entity.text, 0, 0);
+                
+                ctx.restore();
+            }
         }
     }
     
@@ -5658,6 +6324,14 @@ class WebCAD {
             const radiusScreen = entity.radius * this.view.scale;
             ctx.beginPath();
             ctx.arc(center.x, center.y, radiusScreen, -entity.startAngle, -entity.endAngle, true);
+            ctx.stroke();
+        } else if (entity.type === 'text') {
+            // Draw a box around the text for highlighting
+            const bounds = entity.getBounds();
+            const p1 = this.view.worldToScreen(bounds.minX, bounds.minY);
+            const p2 = this.view.worldToScreen(bounds.maxX, bounds.maxY);
+            ctx.beginPath();
+            ctx.rect(p1.x, p2.y, p2.x - p1.x, p1.y - p2.y);
             ctx.stroke();
         }
     }
@@ -5788,6 +6462,28 @@ class WebCAD {
                     </div>
                 </div>
             `;
+        } else if (entity.type === 'text') {
+            html = `
+                <div class="prop-group">
+                    <div class="prop-group-title">Text</div>
+                    <div class="prop-row">
+                        <span class="prop-label">Content:</span>
+                        <span class="prop-value">${entity.text}</span>
+                    </div>
+                    <div class="prop-row">
+                        <span class="prop-label">Position:</span>
+                        <span class="prop-value">${Units.format(entity.x)}, ${Units.format(entity.y)}</span>
+                    </div>
+                    <div class="prop-row">
+                        <span class="prop-label">Height:</span>
+                        <span class="prop-value">${Units.format(entity.height)}</span>
+                    </div>
+                    <div class="prop-row">
+                        <span class="prop-label">Rotation:</span>
+                        <span class="prop-value">${(entity.rotation * 180 / Math.PI).toFixed(1)}°</span>
+                    </div>
+                </div>
+            `;
         }
         
         content.innerHTML = html;
@@ -5805,6 +6501,7 @@ class WebCAD {
             }
         }
         this.entities = [];
+        this.invalidateSnapCache();
         this.clearSelection();
         this.centerView();
         this.render();
@@ -5854,10 +6551,14 @@ class WebCAD {
                         entity = new Dimension(item.x1, item.y1, item.x2, item.y2);
                         if (item.offset) entity.offset = item.offset;
                         break;
+                    case 'text':
+                        entity = new Text(item.x, item.y, item.text, item.height, item.rotation);
+                        break;
                 }
                 if (entity) this.entities.push(entity);
             }
             
+            this.invalidateSnapCache();
             this.zoomExtents();
         } catch (err) {
             alert('Error loading file: ' + err.message);
@@ -5919,11 +6620,34 @@ class WebCAD {
                         i += 2;
                     }
                     this.entities.push(new Arc(cx, cy, radius, startAngle, endAngle));
+                } else if (lines[i] === 'TEXT' || lines[i] === 'MTEXT') {
+                    // Parse TEXT entity
+                    let x = 0, y = 0, height = 5, rotation = 0, textContent = '';
+                    i++;
+                    while (i < lines.length && lines[i] !== '0') {
+                        const code = parseInt(lines[i]);
+                        if (code === 1) {
+                            textContent = lines[i + 1] || '';
+                        } else {
+                            const value = parseFloat(lines[i + 1]);
+                            switch (code) {
+                                case 10: x = value; break;
+                                case 20: y = value; break;
+                                case 40: height = value; break;
+                                case 50: rotation = value * Math.PI / 180; break; // Convert degrees to radians
+                            }
+                        }
+                        i += 2;
+                    }
+                    if (textContent) {
+                        this.entities.push(new Text(x, y, textContent, height, rotation));
+                    }
                 } else {
                     i++;
                 }
             }
             
+            this.invalidateSnapCache();
             this.zoomExtents();
         } catch (err) {
             alert('Error parsing DXF: ' + err.message);
@@ -6080,6 +6804,8 @@ class WebCAD {
                 dxf += this.arcToDXF(entity, getHandle);
             } else if (entity.type === 'dim') {
                 dxf += this.dimensionToDXF(entity, getHandle);
+            } else if (entity.type === 'text') {
+                dxf += this.textToDXF(entity, getHandle);
             }
         }
         
@@ -6197,6 +6923,23 @@ class WebCAD {
         return dxf;
     }
     
+    textToDXF(text, getHandle) {
+        let dxf = '0\nTEXT\n';
+        dxf += '5\n' + getHandle() + '\n';
+        dxf += '100\nAcDbEntity\n';
+        dxf += '8\n0\n';  // Layer
+        dxf += '100\nAcDbText\n';
+        dxf += `10\n${text.x.toFixed(6)}\n`;  // Insertion X
+        dxf += `20\n${text.y.toFixed(6)}\n`;  // Insertion Y
+        dxf += `30\n0.0\n`;                   // Z
+        dxf += `40\n${text.height.toFixed(6)}\n`;  // Text height
+        dxf += `1\n${text.text}\n`;           // Text content
+        dxf += `50\n${(text.rotation * 180 / Math.PI).toFixed(6)}\n`;  // Rotation in degrees
+        dxf += '100\nAcDbText\n';
+        
+        return dxf;
+    }
+    
     saveJSON(fileName = 'drawing') {
         const data = {
             version: '1.0',
@@ -6226,6 +6969,13 @@ class WebCAD {
                     obj.radius = e.radius;
                     obj.startAngle = e.startAngle;
                     obj.endAngle = e.endAngle;
+                }
+                if (e.type === 'text') {
+                    obj.x = e.x;
+                    obj.y = e.y;
+                    obj.text = e.text;
+                    obj.height = e.height;
+                    obj.rotation = e.rotation;
                 }
                 if (e.type === 'dim') {
                     obj.offset = e.offset;
