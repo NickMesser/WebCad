@@ -212,6 +212,19 @@
                     <span>°</span>
                 </div>
                 
+                <div class="snap-toggle">
+                    <input type="checkbox" id="trackingToggle" checked>
+                    <label for="trackingToggle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="4" y1="12" x2="20" y2="12" stroke-dasharray="4,2"/>
+                            <line x1="12" y1="4" x2="12" y2="20" stroke-dasharray="4,2"/>
+                            <circle cx="4" cy="12" r="2" fill="currentColor"/>
+                            <circle cx="12" cy="4" r="2" fill="currentColor"/>
+                        </svg>
+                        <span>Track</span>
+                    </label>
+                </div>
+                
                 <div class="tool-divider"></div>
                 
                 <div class="unit-selector">
@@ -367,6 +380,33 @@
                 <div class="dim-input-actions">
                     <button class="dim-btn" id="dimApplyBtn">Apply (Enter)</button>
                     <button class="dim-btn secondary" id="dimCancelBtn">Cancel (Esc)</button>
+                </div>
+            </div>
+            
+            <!-- Save Dialog -->
+            <div class="save-dialog" id="saveDialog">
+                <div class="save-dialog-content">
+                    <div class="save-dialog-header">
+                        <span class="save-dialog-title">Save Drawing</span>
+                        <button class="dim-input-close" id="saveDialogClose">×</button>
+                    </div>
+                    <div class="save-dialog-body">
+                        <div class="dim-field">
+                            <label for="saveFileName">File Name:</label>
+                            <input type="text" id="saveFileName" placeholder="drawing" value="drawing">
+                        </div>
+                        <div class="dim-field">
+                            <label for="saveFileFormat">Format:</label>
+                            <select id="saveFileFormat">
+                                <option value="dxf">DXF (AutoCAD Compatible)</option>
+                                <option value="json">JSON (WebCAD Native)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="save-dialog-actions">
+                        <button class="dim-btn" id="saveConfirmBtn">Save</button>
+                        <button class="dim-btn secondary" id="saveCancelBtn">Cancel</button>
+                    </div>
                 </div>
             </div>
             

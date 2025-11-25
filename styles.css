@@ -615,6 +615,85 @@ body {
 }
 
 /* ========================================
+   Save Dialog
+   ======================================== */
+
+.save-dialog {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+}
+
+.save-dialog.visible {
+    display: flex;
+}
+
+.save-dialog-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 12px;
+    min-width: 350px;
+    box-shadow: var(--shadow-lg);
+    animation: slideIn 0.2s ease;
+}
+
+.save-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-primary);
+    background: var(--bg-tertiary);
+    border-radius: 12px 12px 0 0;
+}
+
+.save-dialog-title {
+    font-weight: 600;
+    font-size: 16px;
+    color: var(--text-primary);
+}
+
+.save-dialog-body {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.save-dialog-body .dim-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.save-dialog-body .dim-field label {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.save-dialog-body .dim-field input,
+.save-dialog-body .dim-field select {
+    padding: 10px 12px;
+    font-size: 14px;
+}
+
+.save-dialog-actions {
+    display: flex;
+    gap: 12px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border-primary);
+    background: var(--bg-tertiary);
+    border-radius: 0 0 12px 12px;
+}
+
+/* ========================================
    Properties Panel
    ======================================== */
 

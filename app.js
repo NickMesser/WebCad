@@ -574,8 +574,14 @@ class WebCAD {
             patternEntities: [],
             patternBasePoint: null,
             patternType: null,  // 'rect' or 'circ'
-            patternPreview: null
+            patternPreview: null,
+            // Alignment tracking
+            trackingPoints: [],  // Points being tracked for alignment
+            activeTrackingLine: null  // Current alignment line being snapped to
         };
+        
+        // Tracking enabled state
+        this.trackingEnabled = true;
         
         // Dimension input state
         this.dimInputVisible = false;
@@ -656,7 +662,16 @@ class WebCAD {
         // File buttons
         document.getElementById('newBtn').addEventListener('click', () => this.newDrawing());
         document.getElementById('loadBtn').addEventListener('click', () => this.loadFile());
-        document.getElementById('saveBtn').addEventListener('click', () => this.saveDXF());
+        document.getElementById('saveBtn').addEventListener('click', () => this.showSaveDialog());
+        
+        // Save dialog
+        document.getElementById('saveDialogClose').addEventListener('click', () => this.hideSaveDialog());
+        document.getElementById('saveCancelBtn').addEventListener('click', () => this.hideSaveDialog());
+        document.getElementById('saveConfirmBtn').addEventListener('click', () => this.performSave());
+        document.getElementById('saveFileName').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') this.performSave();
+            if (e.key === 'Escape') this.hideSaveDialog();
+        });
         
         // Snap toggles
         document.getElementById('snapToggle').addEventListener('change', (e) => {
@@ -669,6 +684,10 @@ class WebCAD {
         
         document.getElementById('orthoToggle').addEventListener('change', (e) => {
             this.orthoEnabled = e.target.checked;
+        });
+        
+        document.getElementById('trackingToggle').addEventListener('change', (e) => {
+            this.trackingEnabled = e.target.checked;
         });
         
         const orthoStepInput = document.getElementById('orthoStep');
@@ -782,12 +801,21 @@ class WebCAD {
         // Reset snap state
         this.activeSnapPoint = null;
         this.snapType = null;
+        this.toolState.activeTrackingLine = null;
         
         // Start with raw world position
         let snappedPos = { ...this.mouse.world };
         
-        // Priority: Snap points > Ortho > Grid
-        // First, check for snap points (endpoints, midpoints, centers, etc.)
+        // Update tracking points when drawing
+        if (this.trackingEnabled && this.toolState.startPoint && this.centerSnapEnabled) {
+            this.updateTrackingPoints(this.mouse.world);
+        } else if (!this.toolState.startPoint) {
+            // Clear tracking points when not drawing
+            this.toolState.trackingPoints = [];
+        }
+        
+        // Priority: Direct snap points > Combined snapping > Grid
+        // First, check for direct snap points (endpoints, midpoints, centers, etc.)
         let foundSnapPoint = false;
         if (this.centerSnapEnabled) {
             const snapResult = this.findSnapPoint(this.mouse.world);
@@ -799,19 +827,60 @@ class WebCAD {
             }
         }
         
-        // If no snap point found, try ortho snapping
-        if (!foundSnapPoint && this.orthoEnabled && this.toolState.startPoint) {
-            if (this.snapEnabled) {
-                // Ortho + grid: snap to grid along ortho line
-                snappedPos = this.applyOrthoSnapWithGrid(this.toolState.startPoint, this.mouse.world);
-            } else {
-                snappedPos = this.applyOrthoSnap(this.toolState.startPoint, this.mouse.world);
+        // If no direct snap, apply ortho and/or tracking
+        if (!foundSnapPoint) {
+            let orthoPos = null;
+            let trackingResult = null;
+            
+            // Calculate ortho position if enabled and we have a start point
+            if (this.orthoEnabled && this.toolState.startPoint) {
+                orthoPos = this.applyOrthoSnap(this.toolState.startPoint, this.mouse.world);
             }
-            this.snapType = 'ortho';
+            
+            // Check tracking alignment (use ortho position if available, else raw mouse)
+            if (this.trackingEnabled && this.toolState.trackingPoints.length > 0 && this.toolState.startPoint) {
+                const posToCheck = orthoPos || this.mouse.world;
+                trackingResult = this.findTrackingAlignment(posToCheck);
+            }
+            
+            // Determine final position based on what's available
+            if (orthoPos && trackingResult) {
+                // Both ortho and tracking - find intersection on ortho line
+                const orthoTrackingPos = this.combineOrthoAndTracking(
+                    this.toolState.startPoint, 
+                    orthoPos, 
+                    trackingResult
+                );
+                if (orthoTrackingPos) {
+                    snappedPos = orthoTrackingPos;
+                    this.toolState.activeTrackingLine = trackingResult;
+                    this.snapType = 'ortho+tracking';
+                } else {
+                    // No valid intersection, just use ortho
+                    snappedPos = this.snapEnabled 
+                        ? this.applyOrthoSnapWithGrid(this.toolState.startPoint, this.mouse.world)
+                        : orthoPos;
+                    this.snapType = 'ortho';
+                }
+                foundSnapPoint = true;
+            } else if (orthoPos) {
+                // Only ortho
+                snappedPos = this.snapEnabled 
+                    ? this.applyOrthoSnapWithGrid(this.toolState.startPoint, this.mouse.world)
+                    : orthoPos;
+                this.snapType = 'ortho';
+                foundSnapPoint = true;
+            } else if (trackingResult) {
+                // Only tracking
+                snappedPos = trackingResult.point;
+                this.toolState.activeTrackingLine = trackingResult;
+                this.snapType = 'tracking';
+                foundSnapPoint = true;
+            }
         }
         
-        // If no snap point and no ortho, try grid snapping
-        if (!foundSnapPoint && !this.orthoEnabled && this.snapEnabled) {
+        // If nothing else, try grid snapping
+        if (!foundSnapPoint && this.snapEnabled) {
             snappedPos = Geometry.snapToGrid(
                 this.mouse.world.x, 
                 this.mouse.world.y, 
@@ -827,6 +896,270 @@ class WebCAD {
         const displayY = Units.toDisplay(this.mouse.snapped.y);
         document.getElementById('coordX').textContent = displayX.toFixed(2);
         document.getElementById('coordY').textContent = displayY.toFixed(2);
+    }
+    
+    // Update tracking points based on mouse position
+    updateTrackingPoints(mousePos) {
+        const trackingTolerance = 15 / this.view.scale;
+        
+        // Find all snap points in the drawing
+        const allSnapPoints = this.getAllSnapPoints();
+        
+        // Check if mouse is near any snap point to add it for tracking
+        for (const sp of allSnapPoints) {
+            const dist = Math.hypot(mousePos.x - sp.x, mousePos.y - sp.y);
+            if (dist < trackingTolerance) {
+                // Check if this point is already being tracked
+                const alreadyTracked = this.toolState.trackingPoints.some(
+                    tp => Math.hypot(tp.x - sp.x, tp.y - sp.y) < 0.001
+                );
+                if (!alreadyTracked) {
+                    this.toolState.trackingPoints.push({ x: sp.x, y: sp.y, type: sp.type });
+                    // Limit tracking points to prevent clutter
+                    if (this.toolState.trackingPoints.length > 5) {
+                        this.toolState.trackingPoints.shift();
+                    }
+                }
+            }
+        }
+    }
+    
+    // Get all snap points from all entities
+    getAllSnapPoints() {
+        const points = [];
+        
+        for (const entity of this.entities) {
+            if (entity.type === 'line') {
+                points.push({ x: entity.x1, y: entity.y1, type: 'endpoint' });
+                points.push({ x: entity.x2, y: entity.y2, type: 'endpoint' });
+                points.push({ 
+                    x: (entity.x1 + entity.x2) / 2, 
+                    y: (entity.y1 + entity.y2) / 2, 
+                    type: 'midpoint' 
+                });
+            } else if (entity.type === 'circle') {
+                points.push({ x: entity.cx, y: entity.cy, type: 'center' });
+                points.push({ x: entity.cx + entity.radius, y: entity.cy, type: 'quadrant' });
+                points.push({ x: entity.cx - entity.radius, y: entity.cy, type: 'quadrant' });
+                points.push({ x: entity.cx, y: entity.cy + entity.radius, type: 'quadrant' });
+                points.push({ x: entity.cx, y: entity.cy - entity.radius, type: 'quadrant' });
+            } else if (entity.type === 'arc') {
+                points.push({ x: entity.cx, y: entity.cy, type: 'center' });
+                const startPt = entity.getStartPoint();
+                const endPt = entity.getEndPoint();
+                points.push({ x: startPt.x, y: startPt.y, type: 'endpoint' });
+                points.push({ x: endPt.x, y: endPt.y, type: 'endpoint' });
+            } else if (entity.type === 'rect') {
+                points.push({ x: entity.x1, y: entity.y1, type: 'endpoint' });
+                points.push({ x: entity.x2, y: entity.y1, type: 'endpoint' });
+                points.push({ x: entity.x2, y: entity.y2, type: 'endpoint' });
+                points.push({ x: entity.x1, y: entity.y2, type: 'endpoint' });
+                points.push({ 
+                    x: (entity.x1 + entity.x2) / 2, 
+                    y: (entity.y1 + entity.y2) / 2, 
+                    type: 'center' 
+                });
+            }
+        }
+        
+        return points;
+    }
+    
+    // Combine ortho constraint with tracking alignment
+    combineOrthoAndTracking(startPoint, orthoPos, trackingResult) {
+        // Get the ortho line direction
+        const orthoDx = orthoPos.x - startPoint.x;
+        const orthoDy = orthoPos.y - startPoint.y;
+        const orthoLen = Math.hypot(orthoDx, orthoDy);
+        
+        if (orthoLen < 0.001) return null;
+        
+        // Normalize ortho direction
+        const orthoUnitX = orthoDx / orthoLen;
+        const orthoUnitY = orthoDy / orthoLen;
+        
+        // The tracking gives us a target point - find where the ortho line 
+        // passes closest to that point or intersects the tracking constraint
+        const tp = trackingResult.fromPoint;
+        
+        if (trackingResult.direction === 'horizontal') {
+            // Tracking wants Y = tp.y
+            // Ortho line: P = startPoint + t * (orthoUnit)
+            // Find t where startPoint.y + t * orthoUnitY = tp.y
+            if (Math.abs(orthoUnitY) < 0.001) {
+                // Ortho line is horizontal too - check if same Y
+                if (Math.abs(startPoint.y - tp.y) < 1) {
+                    return orthoPos; // Already on the line
+                }
+                return null; // Parallel, no intersection
+            }
+            const t = (tp.y - startPoint.y) / orthoUnitY;
+            if (t > 0) { // Only forward along the ortho line
+                return {
+                    x: startPoint.x + t * orthoUnitX,
+                    y: tp.y
+                };
+            }
+        } else if (trackingResult.direction === 'vertical') {
+            // Tracking wants X = tp.x
+            if (Math.abs(orthoUnitX) < 0.001) {
+                // Ortho line is vertical too - check if same X
+                if (Math.abs(startPoint.x - tp.x) < 1) {
+                    return orthoPos;
+                }
+                return null;
+            }
+            const t = (tp.x - startPoint.x) / orthoUnitX;
+            if (t > 0) {
+                return {
+                    x: tp.x,
+                    y: startPoint.y + t * orthoUnitY
+                };
+            }
+        } else if (trackingResult.direction === 'intersection') {
+            // Intersection of two tracking lines - this is a fixed point
+            // Check if it lies on or near the ortho line
+            const intPoint = trackingResult.point;
+            
+            // Project intersection point onto ortho line
+            const toIntX = intPoint.x - startPoint.x;
+            const toIntY = intPoint.y - startPoint.y;
+            const projLen = toIntX * orthoUnitX + toIntY * orthoUnitY;
+            
+            if (projLen > 0) {
+                const projX = startPoint.x + projLen * orthoUnitX;
+                const projY = startPoint.y + projLen * orthoUnitY;
+                
+                // Check if intersection point is close to ortho line
+                const distToLine = Math.hypot(intPoint.x - projX, intPoint.y - projY);
+                const tolerance = 10 / this.view.scale;
+                
+                if (distToLine < tolerance) {
+                    return { x: projX, y: projY };
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    // Find tracking alignment along an ortho-constrained line
+    findTrackingAlignmentOnLine(workingPos, startPoint, isOrtho) {
+        if (!isOrtho) return this.findTrackingAlignment(workingPos);
+        
+        const alignmentTolerance = 10 / this.view.scale;
+        let bestAlignment = null;
+        let bestDistance = alignmentTolerance;
+        
+        // Get the ortho direction
+        const dx = workingPos.x - startPoint.x;
+        const dy = workingPos.y - startPoint.y;
+        const isHorizontalOrtho = Math.abs(dx) > Math.abs(dy);
+        
+        for (const tp of this.toolState.trackingPoints) {
+            if (isHorizontalOrtho) {
+                // Moving horizontally - check for vertical alignment with tracking points
+                // The Y is fixed by ortho, so we can snap X to tracking point's X
+                const dist = Math.abs(workingPos.x - tp.x);
+                if (dist < bestDistance) {
+                    // Check that the tracking point's Y is close to our ortho line's Y
+                    if (Math.abs(tp.y - workingPos.y) < alignmentTolerance * 3) {
+                        bestDistance = dist;
+                        bestAlignment = {
+                            point: { x: tp.x, y: workingPos.y },
+                            fromPoint: tp,
+                            direction: 'vertical'
+                        };
+                    }
+                }
+            } else {
+                // Moving vertically - check for horizontal alignment with tracking points
+                // The X is fixed by ortho, so we can snap Y to tracking point's Y
+                const dist = Math.abs(workingPos.y - tp.y);
+                if (dist < bestDistance) {
+                    // Check that the tracking point's X is close to our ortho line's X
+                    if (Math.abs(tp.x - workingPos.x) < alignmentTolerance * 3) {
+                        bestDistance = dist;
+                        bestAlignment = {
+                            point: { x: workingPos.x, y: tp.y },
+                            fromPoint: tp,
+                            direction: 'horizontal'
+                        };
+                    }
+                }
+            }
+        }
+        
+        return bestAlignment;
+    }
+    
+    // Find if mouse is aligned with any tracking point
+    findTrackingAlignment(mousePos) {
+        const alignmentTolerance = 8 / this.view.scale;
+        let bestAlignment = null;
+        let bestDistance = alignmentTolerance;
+        
+        for (const tp of this.toolState.trackingPoints) {
+            // Check horizontal alignment
+            const hDist = Math.abs(mousePos.y - tp.y);
+            if (hDist < bestDistance) {
+                bestDistance = hDist;
+                bestAlignment = {
+                    point: { x: mousePos.x, y: tp.y },
+                    fromPoint: tp,
+                    direction: 'horizontal'
+                };
+            }
+            
+            // Check vertical alignment
+            const vDist = Math.abs(mousePos.x - tp.x);
+            if (vDist < bestDistance) {
+                bestDistance = vDist;
+                bestAlignment = {
+                    point: { x: tp.x, y: mousePos.y },
+                    fromPoint: tp,
+                    direction: 'vertical'
+                };
+            }
+        }
+        
+        // Check for intersection of two tracking lines
+        if (this.toolState.trackingPoints.length >= 2) {
+            for (let i = 0; i < this.toolState.trackingPoints.length; i++) {
+                for (let j = i + 1; j < this.toolState.trackingPoints.length; j++) {
+                    const tp1 = this.toolState.trackingPoints[i];
+                    const tp2 = this.toolState.trackingPoints[j];
+                    
+                    // Intersection of horizontal from tp1 and vertical from tp2
+                    const intPoint1 = { x: tp2.x, y: tp1.y };
+                    const dist1 = Math.hypot(mousePos.x - intPoint1.x, mousePos.y - intPoint1.y);
+                    if (dist1 < bestDistance) {
+                        bestDistance = dist1;
+                        bestAlignment = {
+                            point: intPoint1,
+                            fromPoint: tp1,
+                            fromPoint2: tp2,
+                            direction: 'intersection'
+                        };
+                    }
+                    
+                    // Intersection of vertical from tp1 and horizontal from tp2
+                    const intPoint2 = { x: tp1.x, y: tp2.y };
+                    const dist2 = Math.hypot(mousePos.x - intPoint2.x, mousePos.y - intPoint2.y);
+                    if (dist2 < bestDistance) {
+                        bestDistance = dist2;
+                        bestAlignment = {
+                            point: intPoint2,
+                            fromPoint: tp1,
+                            fromPoint2: tp2,
+                            direction: 'intersection'
+                        };
+                    }
+                }
+            }
+        }
+        
+        return bestAlignment;
     }
     
     // Apply ortho snapping - constrain to angle steps from start point
@@ -1650,7 +1983,9 @@ class WebCAD {
             this.toolState.scaleEntities.length > 0 ||
             this.toolState.offsetEntity ||
             this.toolState.arcPoint1 ||
-            this.toolState.arcPoint2;
+            this.toolState.arcPoint2 ||
+            this.toolState.patternEntities.length > 0 ||
+            this.toolState.patternBasePoint;
         
         // If there's something to cancel, cancel it
         if (hasActiveOperation) {
@@ -1666,12 +2001,22 @@ class WebCAD {
             this.toolState.offsetEntity = null;
             this.toolState.arcPoint1 = null;
             this.toolState.arcPoint2 = null;
+            this.toolState.patternEntities = [];
+            this.toolState.patternBasePoint = null;
+            this.toolState.patternPreview = null;
+            this.toolState.trackingPoints = [];
+            this.toolState.activeTrackingLine = null;
             this.hideDimensionInput();
             this.updateStatus();
             this.render();
         } else if (this.currentTool !== 'select') {
             // Nothing to cancel and not already on select - switch to select tool
             this.setTool('select');
+        } else if (this.toolState.selectedEntities.length > 0) {
+            // Already on select tool, nothing to cancel - clear selection
+            this.clearSelection();
+            this.updateStatus();
+            this.render();
         }
     }
     
@@ -2262,6 +2607,8 @@ class WebCAD {
         if (!this.toolState.startPoint) {
             // First click - set start point
             this.toolState.startPoint = point;
+            // Reset tracking for new line
+            this.toolState.trackingPoints = [];
         } else {
             // Create line from start to current point
             const line = new Line(
@@ -2276,6 +2623,8 @@ class WebCAD {
             // User presses Escape to exit
             this.toolState.startPoint = { ...point };
             this.toolState.previewPoint = { ...point };
+            // Clear tracking for next segment
+            this.toolState.trackingPoints = [];
         }
     }
     
@@ -2286,6 +2635,8 @@ class WebCAD {
     handleRectClick(point) {
         if (!this.toolState.startPoint) {
             this.toolState.startPoint = point;
+            // Reset tracking for new rectangle
+            this.toolState.trackingPoints = [];
         } else {
             // Create 4 separate lines instead of a rectangle entity
             const x1 = this.toolState.startPoint.x;
@@ -2314,6 +2665,8 @@ class WebCAD {
     handleCircleClick(point) {
         if (!this.toolState.startPoint) {
             // First click - set center
+            // Reset tracking for new circle
+            this.toolState.trackingPoints = [];
             this.toolState.startPoint = point;
         } else {
             // Second click - set radius point
@@ -2344,6 +2697,8 @@ class WebCAD {
         if (!this.toolState.arcPoint1) {
             // First click - set start point
             this.toolState.arcPoint1 = { ...point };
+            // Reset tracking for new arc
+            this.toolState.trackingPoints = [];
         } else if (!this.toolState.arcPoint2) {
             // Second click - set end point
             this.toolState.arcPoint2 = { ...point };
@@ -3888,6 +4243,9 @@ class WebCAD {
         // Draw grips for selected entities
         this.drawGrips();
         
+        // Draw tracking lines
+        this.drawTrackingLines();
+        
         // Draw crosshair at cursor
         this.drawCrosshair();
     }
@@ -4031,20 +4389,6 @@ class WebCAD {
         ctx.beginPath();
         ctx.arc(center.x, center.y, radiusScreen, 0, Math.PI * 2);
         ctx.stroke();
-        
-        // Draw center point marker
-        const markerSize = 4;
-        ctx.beginPath();
-        ctx.moveTo(center.x - markerSize, center.y);
-        ctx.lineTo(center.x + markerSize, center.y);
-        ctx.moveTo(center.x, center.y - markerSize);
-        ctx.lineTo(center.x, center.y + markerSize);
-        ctx.stroke();
-        
-        // Draw center dot
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, 2, 0, Math.PI * 2);
-        ctx.fill();
     }
     
     drawArc(arc) {
@@ -4057,26 +4401,6 @@ class WebCAD {
         ctx.beginPath();
         ctx.arc(center.x, center.y, radiusScreen, -arc.startAngle, -arc.endAngle, true);
         ctx.stroke();
-        
-        // Draw center point marker
-        const markerSize = 4;
-        ctx.beginPath();
-        ctx.moveTo(center.x - markerSize, center.y);
-        ctx.lineTo(center.x + markerSize, center.y);
-        ctx.moveTo(center.x, center.y - markerSize);
-        ctx.lineTo(center.x, center.y + markerSize);
-        ctx.stroke();
-        
-        // Draw arc endpoints
-        const startPt = arc.getStartPoint();
-        const endPt = arc.getEndPoint();
-        const screenStart = this.view.worldToScreen(startPt.x, startPt.y);
-        const screenEnd = this.view.worldToScreen(endPt.x, endPt.y);
-        
-        ctx.beginPath();
-        ctx.arc(screenStart.x, screenStart.y, 3, 0, Math.PI * 2);
-        ctx.arc(screenEnd.x, screenEnd.y, 3, 0, Math.PI * 2);
-        ctx.fill();
     }
     
     drawLine(line) {
@@ -4088,12 +4412,6 @@ class WebCAD {
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
         ctx.stroke();
-        
-        // Draw endpoints
-        ctx.beginPath();
-        ctx.arc(p1.x, p1.y, 3, 0, Math.PI * 2);
-        ctx.arc(p2.x, p2.y, 3, 0, Math.PI * 2);
-        ctx.fill();
     }
     
     drawRect(rect) {
@@ -4113,20 +4431,6 @@ class WebCAD {
         // Left
         ctx.lineTo(p1.x, p1.y);
         ctx.stroke();
-        
-        // Draw corner points
-        const corners = [
-            [p1.x, p1.y],
-            [p2.x, p1.y],
-            [p2.x, p2.y],
-            [p1.x, p2.y]
-        ];
-        
-        for (const [cx, cy] of corners) {
-            ctx.beginPath();
-            ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-            ctx.fill();
-        }
     }
     
     drawDimension(dim) {
@@ -4587,6 +4891,96 @@ class WebCAD {
                 }
             }
         }
+    }
+    
+    drawTrackingLines() {
+        if (!this.trackingEnabled) return;
+        if (!this.toolState.startPoint) return;
+        if (this.toolState.trackingPoints.length === 0) return;
+        
+        const ctx = this.ctx;
+        const canvasWidth = this.canvas.width;
+        const canvasHeight = this.canvas.height;
+        
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 1;
+        
+        // Draw tracking lines from each tracked point
+        for (const tp of this.toolState.trackingPoints) {
+            const screenPos = this.view.worldToScreen(tp.x, tp.y);
+            
+            // Draw subtle tracking lines (faded)
+            ctx.strokeStyle = 'rgba(88, 166, 255, 0.3)';
+            
+            // Horizontal line
+            ctx.beginPath();
+            ctx.moveTo(0, screenPos.y);
+            ctx.lineTo(canvasWidth, screenPos.y);
+            ctx.stroke();
+            
+            // Vertical line
+            ctx.beginPath();
+            ctx.moveTo(screenPos.x, 0);
+            ctx.lineTo(screenPos.x, canvasHeight);
+            ctx.stroke();
+            
+            // Draw small marker at the tracking point
+            ctx.fillStyle = 'rgba(88, 166, 255, 0.6)';
+            ctx.beginPath();
+            ctx.arc(screenPos.x, screenPos.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        // Highlight the active tracking line more prominently
+        if (this.toolState.activeTrackingLine) {
+            const tracking = this.toolState.activeTrackingLine;
+            const fromScreen = this.view.worldToScreen(tracking.fromPoint.x, tracking.fromPoint.y);
+            const toScreen = this.view.worldToScreen(this.mouse.snapped.x, this.mouse.snapped.y);
+            
+            ctx.strokeStyle = '#58a6ff';
+            ctx.lineWidth = 1.5;
+            
+            if (tracking.direction === 'horizontal') {
+                ctx.beginPath();
+                ctx.moveTo(fromScreen.x, fromScreen.y);
+                ctx.lineTo(toScreen.x, fromScreen.y);
+                ctx.stroke();
+            } else if (tracking.direction === 'vertical') {
+                ctx.beginPath();
+                ctx.moveTo(fromScreen.x, fromScreen.y);
+                ctx.lineTo(fromScreen.x, toScreen.y);
+                ctx.stroke();
+            } else if (tracking.direction === 'intersection' && tracking.fromPoint2) {
+                const from2Screen = this.view.worldToScreen(tracking.fromPoint2.x, tracking.fromPoint2.y);
+                
+                // Draw both lines to intersection
+                ctx.beginPath();
+                ctx.moveTo(fromScreen.x, fromScreen.y);
+                ctx.lineTo(toScreen.x, toScreen.y);
+                ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.moveTo(from2Screen.x, from2Screen.y);
+                ctx.lineTo(toScreen.x, toScreen.y);
+                ctx.stroke();
+            }
+            
+            // Draw X marker at the alignment point
+            const alignScreen = toScreen;
+            ctx.strokeStyle = '#58a6ff';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
+            const xSize = 6;
+            ctx.beginPath();
+            ctx.moveTo(alignScreen.x - xSize, alignScreen.y - xSize);
+            ctx.lineTo(alignScreen.x + xSize, alignScreen.y + xSize);
+            ctx.moveTo(alignScreen.x + xSize, alignScreen.y - xSize);
+            ctx.lineTo(alignScreen.x - xSize, alignScreen.y + xSize);
+            ctx.stroke();
+        }
+        
+        ctx.restore();
     }
     
     drawCrosshair() {
@@ -5536,37 +5930,166 @@ class WebCAD {
         }
     }
     
-    saveDXF() {
+    // ----------------------------------------
+    // SAVE DIALOG
+    // ----------------------------------------
+    
+    showSaveDialog() {
+        const dialog = document.getElementById('saveDialog');
+        dialog.classList.add('visible');
+        document.getElementById('saveFileName').select();
+    }
+    
+    hideSaveDialog() {
+        const dialog = document.getElementById('saveDialog');
+        dialog.classList.remove('visible');
+        this.canvas.focus();
+    }
+    
+    performSave() {
+        const fileName = document.getElementById('saveFileName').value.trim() || 'drawing';
+        const format = document.getElementById('saveFileFormat').value;
+        
+        if (format === 'dxf') {
+            this.saveDXF(fileName);
+        } else {
+            this.saveJSON(fileName);
+        }
+        
+        this.hideSaveDialog();
+    }
+    
+    saveDXF(fileName = 'drawing') {
         let dxf = '';
         
-        // Header
-        dxf += '0\nSECTION\n2\nHEADER\n';
-        dxf += '9\n$ACADVER\n1\nAC1014\n';
+        // Generate unique handle counter
+        let handleCounter = 1;
+        const getHandle = () => (handleCounter++).toString(16).toUpperCase();
+        
+        // HEADER SECTION - AutoCAD 2000 format (AC1015) for better compatibility
+        dxf += '0\nSECTION\n';
+        dxf += '2\nHEADER\n';
+        dxf += '9\n$ACADVER\n1\nAC1015\n';  // AutoCAD 2000 format
+        dxf += '9\n$INSBASE\n10\n0.0\n20\n0.0\n30\n0.0\n';
+        dxf += '9\n$EXTMIN\n10\n0.0\n20\n0.0\n30\n0.0\n';
+        dxf += '9\n$EXTMAX\n10\n1000.0\n20\n1000.0\n30\n0.0\n';
+        dxf += '9\n$LIMMIN\n10\n0.0\n20\n0.0\n';
+        dxf += '9\n$LIMMAX\n10\n1000.0\n20\n1000.0\n';
+        dxf += '9\n$ORTHOMODE\n70\n0\n';
+        dxf += '9\n$LTSCALE\n40\n1.0\n';
+        dxf += '9\n$TEXTSTYLE\n7\nSTANDARD\n';
+        dxf += '9\n$CLAYER\n8\n0\n';
+        dxf += '9\n$DIMSCALE\n40\n1.0\n';
+        dxf += '9\n$LUNITS\n70\n2\n';  // Decimal units
+        dxf += '9\n$LUPREC\n70\n4\n';  // 4 decimal places
+        dxf += '9\n$MEASUREMENT\n70\n1\n';  // Metric
         dxf += '0\nENDSEC\n';
         
-        // Entities section
+        // TABLES SECTION
+        dxf += '0\nSECTION\n';
+        dxf += '2\nTABLES\n';
+        
+        // VPORT table
+        dxf += '0\nTABLE\n2\nVPORT\n5\n8\n100\nAcDbSymbolTable\n70\n1\n';
+        dxf += '0\nVPORT\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbViewportTableRecord\n';
+        dxf += '2\n*ACTIVE\n70\n0\n';
+        dxf += '10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n';
+        dxf += '12\n500.0\n22\n500.0\n13\n0.0\n23\n0.0\n14\n10.0\n24\n10.0\n15\n10.0\n25\n10.0\n';
+        dxf += '16\n0.0\n26\n0.0\n36\n1.0\n17\n0.0\n27\n0.0\n37\n0.0\n';
+        dxf += '40\n1000.0\n41\n2.0\n42\n50.0\n43\n0.0\n44\n0.0\n50\n0.0\n51\n0.0\n';
+        dxf += '71\n0\n72\n100\n73\n1\n74\n3\n75\n0\n76\n0\n77\n0\n78\n0\n';
+        dxf += '0\nENDTAB\n';
+        
+        // LTYPE table (line types)
+        dxf += '0\nTABLE\n2\nLTYPE\n5\n5\n100\nAcDbSymbolTable\n70\n3\n';
+        // ByBlock
+        dxf += '0\nLTYPE\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n';
+        dxf += '2\nBYBLOCK\n70\n0\n3\n\n72\n65\n73\n0\n40\n0.0\n';
+        // ByLayer
+        dxf += '0\nLTYPE\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n';
+        dxf += '2\nBYLAYER\n70\n0\n3\n\n72\n65\n73\n0\n40\n0.0\n';
+        // Continuous
+        dxf += '0\nLTYPE\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n';
+        dxf += '2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0\n';
+        dxf += '0\nENDTAB\n';
+        
+        // LAYER table
+        dxf += '0\nTABLE\n2\nLAYER\n5\n2\n100\nAcDbSymbolTable\n70\n2\n';
+        // Layer 0
+        dxf += '0\nLAYER\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n';
+        dxf += '2\n0\n70\n0\n62\n7\n6\nCONTINUOUS\n370\n-3\n390\nF\n';
+        // DIMENSIONS layer
+        dxf += '0\nLAYER\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n';
+        dxf += '2\nDIMENSIONS\n70\n0\n62\n2\n6\nCONTINUOUS\n370\n-3\n390\nF\n';
+        dxf += '0\nENDTAB\n';
+        
+        // STYLE table (text styles)
+        dxf += '0\nTABLE\n2\nSTYLE\n5\n3\n100\nAcDbSymbolTable\n70\n1\n';
+        dxf += '0\nSTYLE\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbTextStyleTableRecord\n';
+        dxf += '2\nSTANDARD\n70\n0\n40\n0.0\n41\n1.0\n50\n0.0\n71\n0\n42\n2.5\n3\ntxt\n4\n\n';
+        dxf += '0\nENDTAB\n';
+        
+        // VIEW table
+        dxf += '0\nTABLE\n2\nVIEW\n5\n6\n100\nAcDbSymbolTable\n70\n0\n0\nENDTAB\n';
+        
+        // UCS table
+        dxf += '0\nTABLE\n2\nUCS\n5\n7\n100\nAcDbSymbolTable\n70\n0\n0\nENDTAB\n';
+        
+        // APPID table
+        dxf += '0\nTABLE\n2\nAPPID\n5\n9\n100\nAcDbSymbolTable\n70\n1\n';
+        dxf += '0\nAPPID\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n';
+        dxf += '2\nACAD\n70\n0\n';
+        dxf += '0\nENDTAB\n';
+        
+        // DIMSTYLE table
+        dxf += '0\nTABLE\n2\nDIMSTYLE\n5\nA\n100\nAcDbSymbolTable\n70\n1\n100\nAcDbDimStyleTable\n71\n1\n';
+        dxf += '0\nDIMSTYLE\n105\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbDimStyleTableRecord\n';
+        dxf += '2\nSTANDARD\n70\n0\n';
+        dxf += '0\nENDTAB\n';
+        
+        // BLOCK_RECORD table
+        dxf += '0\nTABLE\n2\nBLOCK_RECORD\n5\n1\n100\nAcDbSymbolTable\n70\n2\n';
+        dxf += '0\nBLOCK_RECORD\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n2\n*MODEL_SPACE\n70\n0\n280\n1\n281\n0\n';
+        dxf += '0\nBLOCK_RECORD\n5\n' + getHandle() + '\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n2\n*PAPER_SPACE\n70\n0\n280\n1\n281\n0\n';
+        dxf += '0\nENDTAB\n';
+        
+        dxf += '0\nENDSEC\n';
+        
+        // BLOCKS SECTION
+        dxf += '0\nSECTION\n2\nBLOCKS\n';
+        dxf += '0\nBLOCK\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockBegin\n2\n*MODEL_SPACE\n70\n0\n10\n0.0\n20\n0.0\n30\n0.0\n3\n*MODEL_SPACE\n1\n\n';
+        dxf += '0\nENDBLK\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockEnd\n';
+        dxf += '0\nBLOCK\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockBegin\n2\n*PAPER_SPACE\n70\n0\n10\n0.0\n20\n0.0\n30\n0.0\n3\n*PAPER_SPACE\n1\n\n';
+        dxf += '0\nENDBLK\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockEnd\n';
+        dxf += '0\nENDSEC\n';
+        
+        // ENTITIES SECTION
         dxf += '0\nSECTION\n2\nENTITIES\n';
         
         for (const entity of this.entities) {
             if (entity.type === 'line') {
-                dxf += this.lineTosDXF(entity);
+                dxf += this.lineToDXF(entity, getHandle);
             } else if (entity.type === 'rect') {
-                // Convert rect to 4 lines
                 const lines = entity.toLines();
                 for (const line of lines) {
-                    dxf += this.lineTosDXF(line);
+                    dxf += this.lineToDXF(line, getHandle);
                 }
             } else if (entity.type === 'circle') {
-                dxf += this.circleToDXF(entity);
+                dxf += this.circleToDXF(entity, getHandle);
             } else if (entity.type === 'arc') {
-                dxf += this.arcToDXF(entity);
+                dxf += this.arcToDXF(entity, getHandle);
             } else if (entity.type === 'dim') {
-                // Export dimension as lines + text
-                dxf += this.dimensionToDXF(entity);
+                dxf += this.dimensionToDXF(entity, getHandle);
             }
         }
         
         dxf += '0\nENDSEC\n';
+        
+        // OBJECTS SECTION
+        dxf += '0\nSECTION\n2\nOBJECTS\n';
+        dxf += '0\nDICTIONARY\n5\nC\n100\nAcDbDictionary\n281\n1\n';
+        dxf += '0\nENDSEC\n';
+        
         dxf += '0\nEOF\n';
         
         // Download
@@ -5574,30 +6097,68 @@ class WebCAD {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'drawing.dxf';
+        a.download = fileName + '.dxf';
         a.click();
         URL.revokeObjectURL(url);
     }
     
-    lineTosDXF(line) {
-        return `0\nLINE\n8\n0\n10\n${line.x1}\n20\n${line.y1}\n30\n0\n11\n${line.x2}\n21\n${line.y2}\n31\n0\n`;
+    lineToDXF(line, getHandle) {
+        let dxf = '0\nLINE\n';
+        dxf += '5\n' + getHandle() + '\n';
+        dxf += '100\nAcDbEntity\n';
+        dxf += '8\n0\n';  // Layer
+        dxf += '100\nAcDbLine\n';
+        dxf += `10\n${line.x1.toFixed(6)}\n`;
+        dxf += `20\n${line.y1.toFixed(6)}\n`;
+        dxf += '30\n0.0\n';
+        dxf += `11\n${line.x2.toFixed(6)}\n`;
+        dxf += `21\n${line.y2.toFixed(6)}\n`;
+        dxf += '31\n0.0\n';
+        return dxf;
     }
     
-    circleToDXF(circle) {
-        return `0\nCIRCLE\n8\n0\n10\n${circle.cx}\n20\n${circle.cy}\n30\n0\n40\n${circle.radius}\n`;
+    circleToDXF(circle, getHandle) {
+        let dxf = '0\nCIRCLE\n';
+        dxf += '5\n' + getHandle() + '\n';
+        dxf += '100\nAcDbEntity\n';
+        dxf += '8\n0\n';
+        dxf += '100\nAcDbCircle\n';
+        dxf += `10\n${circle.cx.toFixed(6)}\n`;
+        dxf += `20\n${circle.cy.toFixed(6)}\n`;
+        dxf += '30\n0.0\n';
+        dxf += `40\n${circle.radius.toFixed(6)}\n`;
+        return dxf;
     }
     
-    arcToDXF(arc) {
-        // DXF ARC uses angles in degrees
-        const startDeg = arc.startAngle * 180 / Math.PI;
-        const endDeg = arc.endAngle * 180 / Math.PI;
-        return `0\nARC\n8\n0\n10\n${arc.cx}\n20\n${arc.cy}\n30\n0\n40\n${arc.radius}\n50\n${startDeg}\n51\n${endDeg}\n`;
+    arcToDXF(arc, getHandle) {
+        // DXF ARC uses angles in degrees, counter-clockwise from positive X axis
+        let startDeg = arc.startAngle * 180 / Math.PI;
+        let endDeg = arc.endAngle * 180 / Math.PI;
+        
+        // Normalize angles to 0-360 range
+        while (startDeg < 0) startDeg += 360;
+        while (endDeg < 0) endDeg += 360;
+        while (startDeg >= 360) startDeg -= 360;
+        while (endDeg >= 360) endDeg -= 360;
+        
+        let dxf = '0\nARC\n';
+        dxf += '5\n' + getHandle() + '\n';
+        dxf += '100\nAcDbEntity\n';
+        dxf += '8\n0\n';
+        dxf += '100\nAcDbCircle\n';
+        dxf += `10\n${arc.cx.toFixed(6)}\n`;
+        dxf += `20\n${arc.cy.toFixed(6)}\n`;
+        dxf += '30\n0.0\n';
+        dxf += `40\n${arc.radius.toFixed(6)}\n`;
+        dxf += '100\nAcDbArc\n';
+        dxf += `50\n${startDeg.toFixed(6)}\n`;
+        dxf += `51\n${endDeg.toFixed(6)}\n`;
+        return dxf;
     }
     
-    dimensionToDXF(dim) {
+    dimensionToDXF(dim, getHandle) {
         let dxf = '';
         
-        // Calculate dimension geometry
         const dx = dim.x2 - dim.x1;
         const dy = dim.y2 - dim.y1;
         const length = Math.sqrt(dx * dx + dy * dy);
@@ -5608,22 +6169,35 @@ class WebCAD {
         const py = dx / length;
         const offset = dim.offset;
         
-        // Extension lines
-        dxf += `0\nLINE\n8\nDIMENSIONS\n10\n${dim.x1}\n20\n${dim.y1}\n30\n0\n11\n${dim.x1 + px * offset}\n21\n${dim.y1 + py * offset}\n31\n0\n`;
-        dxf += `0\nLINE\n8\nDIMENSIONS\n10\n${dim.x2}\n20\n${dim.y2}\n30\n0\n11\n${dim.x2 + px * offset}\n21\n${dim.y2 + py * offset}\n31\n0\n`;
+        // Extension lines on DIMENSIONS layer
+        dxf += '0\nLINE\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\nDIMENSIONS\n100\nAcDbLine\n';
+        dxf += `10\n${dim.x1.toFixed(6)}\n20\n${dim.y1.toFixed(6)}\n30\n0.0\n`;
+        dxf += `11\n${(dim.x1 + px * offset).toFixed(6)}\n21\n${(dim.y1 + py * offset).toFixed(6)}\n31\n0.0\n`;
+        
+        dxf += '0\nLINE\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\nDIMENSIONS\n100\nAcDbLine\n';
+        dxf += `10\n${dim.x2.toFixed(6)}\n20\n${dim.y2.toFixed(6)}\n30\n0.0\n`;
+        dxf += `11\n${(dim.x2 + px * offset).toFixed(6)}\n21\n${(dim.y2 + py * offset).toFixed(6)}\n31\n0.0\n`;
         
         // Dimension line
-        dxf += `0\nLINE\n8\nDIMENSIONS\n10\n${dim.x1 + px * offset}\n20\n${dim.y1 + py * offset}\n30\n0\n11\n${dim.x2 + px * offset}\n21\n${dim.y2 + py * offset}\n31\n0\n`;
+        dxf += '0\nLINE\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\nDIMENSIONS\n100\nAcDbLine\n';
+        dxf += `10\n${(dim.x1 + px * offset).toFixed(6)}\n20\n${(dim.y1 + py * offset).toFixed(6)}\n30\n0.0\n`;
+        dxf += `11\n${(dim.x2 + px * offset).toFixed(6)}\n21\n${(dim.y2 + py * offset).toFixed(6)}\n31\n0.0\n`;
         
         // Text
         const midX = (dim.x1 + dim.x2) / 2 + px * offset;
         const midY = (dim.y1 + dim.y2) / 2 + py * offset;
-        dxf += `0\nTEXT\n8\nDIMENSIONS\n10\n${midX}\n20\n${midY}\n30\n0\n40\n${CONFIG.arrowSize}\n1\n${dim.getText()}\n`;
+        const textHeight = CONFIG.arrowSize * 1.5;
+        
+        dxf += '0\nTEXT\n5\n' + getHandle() + '\n100\nAcDbEntity\n8\nDIMENSIONS\n100\nAcDbText\n';
+        dxf += `10\n${midX.toFixed(6)}\n20\n${midY.toFixed(6)}\n30\n0.0\n`;
+        dxf += `40\n${textHeight.toFixed(6)}\n`;
+        dxf += `1\n${dim.getText()}\n`;
+        dxf += '100\nAcDbText\n';
         
         return dxf;
     }
     
-    saveJSON() {
+    saveJSON(fileName = 'drawing') {
         const data = {
             version: '1.0',
             units: CONFIG.units,
@@ -5664,7 +6238,7 @@ class WebCAD {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'drawing.cad';
+        a.download = fileName + '.json';
         a.click();
         URL.revokeObjectURL(url);
     }
