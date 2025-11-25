@@ -15,6 +15,12 @@
 <h3 align="center">A fully-featured 2D CAD application that runs entirely in your browser</h3>
 
 <p align="center">
+  <a href="https://nickmesser.github.io/WebCad/">
+    <img src="https://img.shields.io/badge/▶%20Live%20Demo-Try%20It%20Now-00d4aa?style=for-the-badge&logoColor=white" alt="Live Demo"/>
+  </a>
+</p>
+
+<p align="center">
   <a href="#-features">Features</a> •
   <a href="#-the-story">The Story</a> •
   <a href="#-quick-start">Quick Start</a> •
@@ -81,11 +87,16 @@ The fact that this works—and works *well*—is a testament to how far AI-assis
 
 ## 🚀 Quick Start
 
-**No installation required!** Just open the files in your browser:
+### Try It Online
+**No installation required!** Just visit the live demo:
+
+👉 **[https://nickmesser.github.io/WebCad/](https://nickmesser.github.io/WebCad/)**
+
+### Run Locally
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/WebCad.git
+git clone https://github.com/nickmesser/WebCad.git
 
 # Open in browser
 open index.html
